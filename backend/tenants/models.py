@@ -4,6 +4,7 @@ from django.db import models
 
 from django.contrib.auth import get_user_model
 import uuid
+import pytz
 
 User = get_user_model()
 
@@ -12,6 +13,8 @@ class Tenant(models.Model):
     tenant_id = models.UUIDField(default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     slug = models.SlugField(unique=True, db_index=True)
+    location = models.CharField(max_length=100)
+    domain = models.CharField(max_length=50)
     
     # Limits and quotas
     max_storage_gb = models.IntegerField(default=100)
@@ -24,6 +27,12 @@ class Tenant(models.Model):
     
     # Qdrant collection name
     vector_collection_name = models.CharField(max_length=255, unique=True)
+    timezone = models.CharField(
+        max_length=50,
+        choices=[(tz, tz) for tz in pytz.all_timezones],
+        default="Europe/Berlin",
+        help_text="Timezone for the tenant"
+    )
     
     class Meta:
         db_table = 'tenants'
