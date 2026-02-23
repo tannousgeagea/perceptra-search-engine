@@ -199,3 +199,5 @@ cython_debug/
 captions/
 
 db.sqlite3
+
+staticfiles/

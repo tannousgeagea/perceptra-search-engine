@@ -1,0 +1,45 @@
+
+
+services:
+  search-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args:
+        user: ${user}
+        userid: ${userid}
+        group: ${group}
+        groupid: ${groupid}
+    image: tannousgeagea/search-engine:latest
+    container_name: search-engine-core
+    env_file: .env
+    ports:
+      - 8000:8000
+      - 9005:9005
+    volumes:
+      - .:/home/appuser/src
+      - ${MEDIA_ROOT}:/media
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    depends_on:
+      - db
+    working_dir: /home/appuser/src
+
+  db:
+    image: postgres:latest
+    container_name: search-engine-db
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${DATABASE_USER}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      POSTGRES_DB: ${DATABASE_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

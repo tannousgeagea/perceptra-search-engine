@@ -129,10 +129,39 @@ USE_I18N = True
 USE_TZ = True
 
 
+
+# Storage Configuration
+STORAGE_BACKEND = env('STORAGE_BACKEND', 'local')  # 'azure', 's3', 'minio', 'local'
+
+# Azure Blob Storage
+AZURE_STORAGE_CONNECTION_STRING = env('AZURE_STORAGE_CONNECTION_STRING', '')
+AZURE_STORAGE_ACCOUNT_KEY = env('AZURE_STORAGE_ACCOUNT_KEY', '')
+AZURE_STORAGE_SAS_TOKEN = env('AZURE_STORAGE_SAS_TOKEN', '')
+AZURE_STORAGE_ACCOUNT_NAME = env('AZURE_STORAGE_ACCOUNT_NAME', '')
+AZURE_STORAGE_CONTAINER = env('AZURE_STORAGE_CONTAINER', 'impurity-data')
+
+# AWS S3
+AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID', '')
+AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY', '')
+AWS_S3_BUCKET = env('AWS_S3_BUCKET', 'impurity-data')
+AWS_S3_REGION = env('AWS_S3_REGION', 'us-east-1')
+
+# MinIO (S3-compatible)
+MINIO_ENDPOINT = env('MINIO_ENDPOINT', 'localhost:9000')
+MINIO_ACCESS_KEY = env('MINIO_ACCESS_KEY', '')
+MINIO_SECRET_KEY = env('MINIO_SECRET_KEY', '')
+MINIO_BUCKET = env('MINIO_BUCKET', 'impurity-data')
+MINIO_SECURE = env('MINIO_SECURE', 'False').lower() == 'true'
+
+
+SECRET_KEY = env('SECRET_KEY', 'django-insecure-3padrpl(35z2iyussl9+lac@9o2870==32o!@^11a3wj8)b9-n')
+
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field

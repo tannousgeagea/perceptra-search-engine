@@ -78,11 +78,13 @@ class Video(TenantScopedModel):
     storage_backend = models.CharField(
         max_length=20,
         choices=StorageBackend.choices,
+        default=StorageBackend.LOCAL,
         help_text=_('Storage backend type')
     )
 
     storage_key = models.CharField(
         max_length=500,
+        blank=True,
         help_text=_('Full path/key in storage (e.g., org-123/images/2025/img.jpg)')
     )
 
@@ -225,11 +227,13 @@ class Image(TenantScopedModel):
     storage_backend = models.CharField(
         max_length=20,
         choices=StorageBackend.choices,
+        default=StorageBackend.LOCAL,
         help_text=_('Storage backend type')
     )
 
     storage_key = models.CharField(
         max_length=500,
+        blank=True,
         help_text=_('Full path/key in storage (e.g., org-123/images/2025/img.jpg)')
     )
 
@@ -359,11 +363,13 @@ class Detection(TenantScopedModel):
     storage_backend = models.CharField(
         max_length=20,
         choices=StorageBackend.choices,
+        default=StorageBackend.LOCAL,
         help_text=_('Storage backend type')
     )
 
     storage_key = models.CharField(
         max_length=500,
+        blank=True,
         help_text=_('Full path/key in storage (e.g., org-123/images/2025/img.jpg)')
     )
 
