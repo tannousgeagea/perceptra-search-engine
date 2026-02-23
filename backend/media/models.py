@@ -410,10 +410,6 @@ class Detection(TenantScopedModel):
             return f"/media/{self.storage_key}"
         else:
             return ""
-        
-    def get_tags(self):
-        """Get all tags associated with this detection."""
-        return self.tags.all()
     
     def clean(self):
         """Custom validation to ensure data integrity."""
