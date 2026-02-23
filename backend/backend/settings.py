@@ -45,6 +45,9 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'users',
     'tenants',
+    'search',
+    'media',
+    'embeddings',
 ]
 
 MIDDLEWARE = [
@@ -53,6 +56,11 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+
+    # Tenant middleware (after auth)
+    'apps.tenants.middleware.TenantMiddleware',
+    'apps.tenants.middleware.TenantRequiredMiddleware',
+
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]

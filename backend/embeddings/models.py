@@ -1,8 +1,7 @@
 # apps/embeddings/models.py
 
 from django.db import models
-from backend.tenants.models import Tenant
-from backend.media.models import TenantScopedModel
+from media.models import TenantScopedModel
 import uuid
 
 

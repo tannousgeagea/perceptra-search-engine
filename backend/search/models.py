@@ -2,7 +2,7 @@
 
 from django.db import models
 from django.contrib.auth import get_user_model
-from backend.media.models import TenantScopedModel, Detection
+from media.models import TenantScopedModel, Detection
 import uuid
 
 
@@ -44,3 +44,4 @@ class SearchQuery(TenantScopedModel):
             models.Index(fields=['tenant', 'query_type']),
             models.Index(fields=['user']),
         ]
+        default_manager_name = 'objects'
