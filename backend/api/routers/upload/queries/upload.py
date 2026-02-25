@@ -90,15 +90,31 @@ async def upload_video(
             detail=f"Invalid storage backend: {backend}"
         )
     
-    # Generate storage key: tenant_id/videos/year/month/uuid.ext
-    file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'mp4'
+    
+    filename = file.filename
+    if not filename:
+        filename = f"video_{uuid.uuid4()}.mp4"
+
+    file_extension = filename.split('.')[-1] if '.' in filename else 'mp4'
     year = recorded_datetime.year
     month = f"{recorded_datetime.month:02d}"
     storage_key = f"{ctx.tenant_id}/videos/{year}/{month}/{uuid.uuid4()}.{file_extension}"
     
     # Save to storage
     storage = get_storage_manager(backend=backend)
-    storage_result = await storage.save(storage_key, file_bytes)
+    storage_result = await storage.save(
+        storage_key, 
+        file_bytes,
+        content_type=file.content_type,
+        metadata={
+            "filename": filename,
+            "file_size": file_size,
+            "recorded_at": recorded_datetime.isoformat(),
+            "plant_site": plant_site,
+            "shift": shift,
+            "inspection_line": inspection_line
+        }
+    )
     
     # Parse tags
     tag_list = []
@@ -148,7 +164,7 @@ async def upload_video(
     ]
     
     return VideoUploadResponse(
-        id=video.id,
+        id=video.pk,
         video_id=video.video_id,
         filename=video.filename,
         storage_key=video.storage_key,
@@ -247,14 +263,29 @@ async def upload_image(
         )
     
     # Generate storage key
-    file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
+    filename = file.filename
+    if not filename:
+        filename = f"image_{uuid.uuid4()}.jpg"
+
+    file_extension = filename.split('.')[-1] if '.' in filename else 'jpg'
     year = captured_datetime.year
     month = f"{captured_datetime.month:02d}"
     storage_key = f"{ctx.tenant_id}/images/{year}/{month}/{uuid.uuid4()}.{file_extension}"
     
     # Save to storage
     storage = get_storage_manager(backend=backend)
-    storage_result = await storage.save(storage_key, file_bytes)
+    storage_result = await storage.save(
+        storage_key, file_bytes,
+        content_type=file.content_type,
+        metadata={
+            "filename": file.filename,
+            "file_size": file_size,
+            "recorded_at": captured_datetime.isoformat(),
+            "plant_site": plant_site,
+            "shift": shift,
+            "inspection_line": inspection_line
+        }
+    )
     
     # Parse tags
     tag_list = []
@@ -309,7 +340,7 @@ async def upload_image(
     ]
     
     return ImageUploadResponse(
-        id=image.id,
+        id=image.pk,
         image_id=image.image_id,
         filename=image.filename,
         storage_key=image.storage_key,
@@ -414,9 +445,9 @@ async def create_detection(
     ]
     
     return DetectionResponse(
-        id=detection.id,
+        id=detection.pk,
         detection_id=detection.detection_id,
-        image_id=detection.image.id,
+        image_id=detection.image.pk,
         bbox_x=detection.bbox_x,
         bbox_y=detection.bbox_y,
         bbox_width=detection.bbox_width,
@@ -456,7 +487,7 @@ async def create_detections_bulk(
     images = await sync_to_async(list)(
         Image.objects.filter(id__in=image_ids, tenant=ctx.tenant)
     )
-    image_map = {img.id: img for img in images}
+    image_map = {img.pk: img for img in images}
     
     # Check for missing images
     for det in request.detections:
@@ -502,7 +533,7 @@ async def create_detections_bulk(
             if tag_list:
                 await sync_to_async(detection.tags.set)(tag_list)
             
-            created_ids.append(detection.id)
+            created_ids.append(detection.pk)
             
         except Exception as e:
             errors.append(f"Failed to create detection for image {det_request.image_id}: {str(e)}")

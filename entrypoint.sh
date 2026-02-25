@@ -6,4 +6,4 @@ set -e
 /bin/bash -c "python3 /home/$user/src/backend/manage.py create_superuser"
 /bin/bash -c "python3 /home/$user/src/backend/manage.py collectstatic --noinput"
 
-exec "$@"
+supervisord -n -c /etc/supervisord.conf

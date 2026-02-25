@@ -32,7 +32,7 @@ class StorageManager:
     
     def _initialize_client(self):
         """Initialize the appropriate storage client."""
-        
+        logger.warning(f"Initializing storage client for backend: {self.backend}")
         if self.backend == StorageBackendChoice.AZURE:
             config = {
                 'container_name': settings.AZURE_STORAGE_CONTAINER,

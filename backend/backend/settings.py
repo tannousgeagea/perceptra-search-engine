@@ -58,8 +58,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
 
     # Tenant middleware (after auth)
-    'apps.tenants.middleware.TenantMiddleware',
-    'apps.tenants.middleware.TenantRequiredMiddleware',
+    'tenants.middleware.TenantMiddleware',
+    'tenants.middleware.TenantRequiredMiddleware',
 
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
