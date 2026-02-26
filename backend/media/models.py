@@ -122,8 +122,10 @@ class Video(TenantScopedModel):
     @property
     def file_size_mb(self) -> float:
         """Get file size in megabytes."""
-        return self.file_size_bytes / (1024 * 1024)
-
+        if self.file_size_bytes is not None:
+            return self.file_size_bytes / (1024 * 1024)
+        return 0.0
+    
     @property
     def duration_minutes(self) -> float:
         """Get duration in minutes."""
@@ -136,24 +138,24 @@ class Video(TenantScopedModel):
         """Calculate frame rate if possible."""
         if self.duration_seconds and self.duration_seconds > 0:
             # Assuming we have a way to get total frames (not stored in model)
-            total_frames = self.frames.count()  # This is a queryset count of related Image frames
+            total_frames = self.frames.count()  # type: ignore
             return total_frames / self.duration_seconds
         return 0.0
     
     @property
     def resolution(self) -> str:
         """Get resolution of the video based on its frames."""
-        if self.frames.exists():
+        if self.frames.exists():   # type: ignore
             # Assuming all frames have the same resolution, we can take the first one
-            first_frame = self.frames.first()
+            first_frame = self.frames.first() # type: ignore
             return f"{first_frame.width}x{first_frame.height}"
         return "Unknown"
     
     @property
     def aspect_ratio(self) -> float:
         """Calculate aspect ratio based on first frame."""
-        if self.frames.exists():
-            first_frame = self.frames.first()
+        if self.frames.exists():  # type: ignore
+            first_frame = self.frames.first() # type: ignore
             if first_frame.height > 0:
                 return first_frame.width / first_frame.height
         return 0.0
@@ -161,23 +163,23 @@ class Video(TenantScopedModel):
     @property
     def megapixels(self) -> float:
         """Calculate megapixels based on first frame."""
-        if self.frames.exists():
-            first_frame = self.frames.first()
+        if self.frames.exists():   # type: ignore
+            first_frame = self.frames.first() # type: ignore
             return (first_frame.width * first_frame.height) / 1_000_000
         return 0.0
     
     @property
     def frame_count(self) -> int:
         """Get total number of frames extracted from this video."""
-        return self.frames.count()
+        return self.frames.count()  #type: ignore
     
     def get_frame_by_timestamp(self, timestamp: float) -> 'Image':
         """Retrieve a frame closest to the given timestamp."""
-        return self.frames.filter(timestamp_in_video__lte=timestamp).order_by('-timestamp_in_video').first()
+        return self.frames.filter(timestamp_in_video__lte=timestamp).order_by('-timestamp_in_video').first()  # type: ignore
 
     def get_frame_by_number(self, frame_number: int) -> 'Image':
         """Retrieve a frame by its frame number."""
-        return self.frames.filter(frame_number=frame_number).first()
+        return self.frames.filter(frame_number=frame_number).first()  # type: ignore
     
     def get_detections(self):
         """Get all detections associated with this video."""
@@ -278,7 +280,9 @@ class Image(TenantScopedModel):
     @property
     def file_size_mb(self) -> float:
         """Get file size in megabytes."""
-        return self.file_size_bytes / (1024 * 1024)
+        if self.file_size_bytes is not None:
+                return self.file_size_bytes / (1024 * 1024)
+        return 0.0
     
     def get_download_url(self) -> str:
         """Generate a pre-signed URL for downloading the image."""
@@ -297,7 +301,7 @@ class Image(TenantScopedModel):
     @property
     def get_detections(self):
         """Get all detections associated with this image."""
-        return self.detections.all()
+        return self.detections.all()   #type: ignore
     
     def get_tags(self):
         """Get all tags associated with this image."""
@@ -590,9 +594,9 @@ class Tag(models.Model):
     @property
     def usage_count(self):
         """Get the total count of how many times this tag is used across images, videos, and detections."""
-        image_count = self.images.count()
-        video_count = self.videos.count()
-        detection_count = self.detections.count()
+        image_count = self.images.count()   # type: ignore
+        video_count = self.videos.count()   # type: ignore
+        detection_count = self.detections.count()   # type: ignore
         return {
             'images': image_count,
             'videos': video_count,
@@ -603,9 +607,9 @@ class Tag(models.Model):
     @property
     def usage_examples(self, limit=5):
         """Get example media items that use this tag."""
-        image_examples = self.images.all()[:limit]
-        video_examples = self.videos.all()[:limit]
-        detection_examples = self.detections.all()[:limit]
+        image_examples = self.images.all()[:limit]  # type: ignore
+        video_examples = self.videos.all()[:limit]  # type: ignore
+        detection_examples = self.detections.all()[:limit]  # type: ignore
         return {
             'images': image_examples,
             'videos': video_examples,
@@ -615,9 +619,9 @@ class Tag(models.Model):
     @property
     def all_media(self):
         """Get all media items (images, videos, detections) associated with this tag."""
-        images = self.images.all()
-        videos = self.videos.all()
-        detections = self.detections.all()
+        images = self.images.all()    # type: ignore
+        videos = self.videos.all()     # type: ignore
+        detections = self.detections.all()  # type: ignore
         return {
             'images': images,
             'videos': videos,

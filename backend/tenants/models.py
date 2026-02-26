@@ -42,10 +42,12 @@ class Tenant(models.Model):
         ]
     
     def save(self, *args, **kwargs):
-        if not self.qdrant_collection_name:
-            self.qdrant_collection_name = f"detections_{self.tenant_id.hex[:12]}"
+        if not self.vector_collection_name:
+            self.vector_collection_name = f"detections_{self.tenant_id.hex[:12]}"
         super().save(*args, **kwargs)
 
+    def __str__(self) -> str:
+        return f"{self.name} ({self.domain})"
 
 
 class TenantMembership(models.Model):

@@ -30,7 +30,7 @@ SECRET_KEY = 'django-insecure-3padrpl(35z2iyussl9+lac@9o2870==32o!@^11a3wj8)b9-n
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = [env('ALLOWED_HOSTS', '0.0.0.0'), '127.0.0.1']
+ALLOWED_HOSTS = [env('ALLOWED_HOSTS', '0.0.0.0'), '127.0.0.1', 'localhost']
 
 
 # Application definition
@@ -58,8 +58,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
 
     # Tenant middleware (after auth)
-    'tenants.middleware.TenantMiddleware',
-    'tenants.middleware.TenantRequiredMiddleware',
+    # 'tenants.middleware.TenantMiddleware',
+    # 'tenants.middleware.TenantRequiredMiddleware',
 
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -85,7 +85,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'backend.wsgi.application'
-
+AUTH_USER_MODEL = "users.CustomUser"
 
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
@@ -171,18 +171,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 UNFOLD = {
     "SITE_HEADER": _("Search Engine"),
     "SITE_TITLE": _("Search Engine Admin"),
-    "SITE_SYMBOL": "speed",
-    "SITE_SYMBOL": "video_search",  # symbol from icon set
-    # "SITE_FAVICONS": [
-    #     {
-    #         "rel": "icon",
-    #         "sizes": "46x32",
-    #         "type": "image/svg+xml",
-    #         "href": lambda request: static("favicon.svg"),
-    #     },
-    # ],
-    "SHOW_HISTORY": True, # show/hide "History" button, default: True
-    "SHOW_VIEW_ON_SITE": True, # show/hide "View on site" button, default: True
+    "SITE_SYMBOL": "video_search",  # keep only one
+
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": True,
+
     "EXTENSIONS": {
         "modeltranslation": {
             "flags": {
@@ -193,22 +186,55 @@ UNFOLD = {
             },
         },
     },
+
     "SIDEBAR": {
         "show_search": True,
         "show_all_applications": True,
         "navigation": [
+
+            # ─────────────────────────────
+            # Dashboard
+            # ─────────────────────────────
             {
                 "title": _("Navigation"),
                 "items": [
                     {
-                        "title": _("All Apps"),
+                        "title": _("Dashboard"),
                         "icon": "dashboard",
                         "link": reverse_lazy("admin:index"),
                     },
-                ]
+                ],
             },
+
+            # ─────────────────────────────
+            # Tenants Section
+            # ─────────────────────────────
             {
-                "title": _("Users & Groups"),
+                "title": _("Tenants"),
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("Organizations"),
+                        "icon": "business",  # clean corporate icon
+                        "link": reverse_lazy(
+                            "admin:tenants_tenant_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Memberships"),
+                        "icon": "badge",
+                        "link": reverse_lazy(
+                            "admin:tenants_tenantmembership_changelist"
+                        ),
+                    },
+                ],
+            },
+
+            # ─────────────────────────────
+            # Users & Groups
+            # ─────────────────────────────
+            {
+                "title": _("Users & Access"),
                 "collapsible": True,
                 "items": [
                     {
@@ -216,17 +242,96 @@ UNFOLD = {
                         "icon": "person",
                         "link": reverse_lazy(
                             "admin:users_customuser_changelist"
-                            ),
+                        ),
                     },
                     {
                         "title": _("Groups"),
                         "icon": "group",
                         "link": reverse_lazy(
                             "admin:auth_group_changelist"
-                            ),
-                    }
+                        ),
+                    },
                 ],
             },
-        ]
+
+            # ─────────────────────────────
+            # Media Section
+            # ─────────────────────────────
+            {
+                "title": _("Media"),
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("Videos"),
+                        "icon": "movie",
+                        "link": reverse_lazy(
+                            "admin:media_video_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Images"),
+                        "icon": "image",
+                        "link": reverse_lazy(
+                            "admin:media_image_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Detections"),
+                        "icon": "center_focus_strong",
+                        "link": reverse_lazy(
+                            "admin:media_detection_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Tags"),
+                        "icon": "local_offer",
+                        "link": reverse_lazy(
+                            "admin:media_tag_changelist"
+                        ),
+                    },
+                ],
+            },
+
+            # ─────────────────────────────
+            # Search Section
+            # ─────────────────────────────
+            {
+                "title": _("Search"),
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("Queries"),
+                        "icon": "search",
+                        "link": reverse_lazy(
+                            "admin:search_searchquery_changelist"
+                        ),
+                    },
+                ],
+            },
+
+            # ─────────────────────────────
+            # Embeddings Section
+            # ─────────────────────────────
+            {
+                "title": _("Embeddings"),
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("Model Versions"),
+                        "icon": "memory",
+                        "link": reverse_lazy(
+                            "admin:embeddings_modelversion_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Embedding Jobs"),
+                        "icon": "settings_suggest",
+                        "link": reverse_lazy(
+                            "admin:embeddings_embeddingjob_changelist"
+                        ),
+                    },
+                ],
+            },
+        ],
     },
 }
