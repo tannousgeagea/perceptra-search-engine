@@ -319,16 +319,17 @@ UNFOLD = {
                     {
                         "title": _("Model Versions"),
                         "icon": "memory",
-                        "link": reverse_lazy(
-                            "admin:embeddings_modelversion_changelist"
-                        ),
+                        "link": reverse_lazy("admin:embeddings_modelversion_changelist"),
+                    },
+                    {
+                        "title": _("Tenant Collections"),
+                        "icon": "storage",
+                        "link": reverse_lazy("admin:embeddings_tenantvectorcollection_changelist"),
                     },
                     {
                         "title": _("Embedding Jobs"),
                         "icon": "settings_suggest",
-                        "link": reverse_lazy(
-                            "admin:embeddings_embeddingjob_changelist"
-                        ),
+                        "link": reverse_lazy("admin:embeddings_embeddingjob_changelist"),
                     },
                 ],
             },
