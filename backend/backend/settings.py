@@ -153,8 +153,39 @@ MINIO_SECRET_KEY = env('MINIO_SECRET_KEY', '')
 MINIO_BUCKET = env('MINIO_BUCKET', 'impurity-data')
 MINIO_SECURE = env('MINIO_SECURE', 'False').lower() == 'true'
 
-
 SECRET_KEY = env('SECRET_KEY', 'django-insecure-3padrpl(35z2iyussl9+lac@9o2870==32o!@^11a3wj8)b9-n')
+
+
+
+# ============================================
+# Vector Database Configuration
+# ============================================
+
+# Default vector database ('qdrant' or 'faiss')
+DEFAULT_VECTOR_DB = env('DEFAULT_VECTOR_DB', 'qdrant')
+
+# Qdrant Configuration
+QDRANT_HOST = env('QDRANT_HOST', 'localhost')
+QDRANT_PORT = int(env('QDRANT_PORT', 6333))
+QDRANT_API_KEY = env('QDRANT_API_KEY', None)
+QDRANT_USE_HTTPS = env('QDRANT_USE_HTTPS', 'False').lower() == 'true'
+QDRANT_TIMEOUT = int(env('QDRANT_TIMEOUT', 60))
+
+# FAISS Configuration
+FAISS_STORAGE_PATH = env('FAISS_STORAGE_PATH', os.path.join(BASE_DIR, 'faiss_indices'))
+FAISS_INDEX_TYPE = env('FAISS_INDEX_TYPE', 'Flat')  # 'Flat', 'IVFFlat', 'HNSW'
+FAISS_USE_GPU = env('FAISS_USE_GPU', 'False').lower() == 'true'
+
+# ============================================
+# Embedding Model Configuration
+# ============================================
+
+# Device for embedding models ('cuda', 'cpu', 'mps')
+EMBEDDING_DEVICE = env('EMBEDDING_DEVICE', 'cuda')
+
+# Model paths (optional)
+PERCEPTION_ENCODER_PATH = env('PERCEPTION_ENCODER_PATH', None)
+SAM_CHECKPOINT_PATH = env('SAM_CHECKPOINT_PATH', None)
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.2/howto/static-files/

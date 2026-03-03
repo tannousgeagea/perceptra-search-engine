@@ -244,3 +244,6 @@ staticfiles/
 *.pptx
 *.txt
 *.md    
+
+
+qdrant_data/
