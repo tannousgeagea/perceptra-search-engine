@@ -2,6 +2,7 @@
 
 from celery import shared_task
 from embeddings.tasks.base import EmbeddingTask, get_active_model_version
+from embeddings.tasks.image import process_image_task
 from media.models import Video, Image, StatusChoices
 from infrastructure.storage.client import get_storage_manager
 import logging
@@ -40,6 +41,21 @@ def process_video_task(video_id: int):
         # For now, this is a placeholder showing the structure
         # frames = extract_frames_from_video(video_bytes, fps=1)  # Extract 1 frame per second
         
+        # For now, assume frames already exist as Image records
+        frames = Image.objects.filter(video=video)
+
+        if frames.exists():
+            logger.info(f"Found {frames.count()} existing frames for video {video_id}")
+            
+            # Trigger image embedding for each frame
+            for frame in frames:
+                process_image_task.delay(frame.id)  #type: ignore
+            
+            frames_count = frames.count()
+        else:
+            logger.warning(f"No frames found for video {video_id}")
+            frames_count = 0
+
         # Placeholder: Simulate frame extraction
         frames_created = 0
         

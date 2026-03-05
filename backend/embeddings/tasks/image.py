@@ -1,11 +1,13 @@
 # apps/embeddings/tasks/image.py
 
 from celery import shared_task
-from embeddings.tasks.base import EmbeddingTask, get_active_model_version
+from embeddings.tasks.base import EmbeddingTask, get_active_model_version, get_or_create_collection
 from media.models import Image, Detection, StatusChoices
 from infrastructure.storage.client import get_storage_manager
-# from infrastructure.qdrant.client import QdrantClient
+from infrastructure.vectordb.base import VectorPoint
+from django.conf import settings
 import logging
+import time
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -34,33 +36,56 @@ def process_image_task(image_id: int):
         
         # Get active model version
         model_version = get_active_model_version()
+        if model_version is None:
+            raise ValueError("No active embedding model configured")
         
+        # Get or create collection
+        collection = get_or_create_collection(image.tenant, model_version)
+
         # Get storage manager
         storage = get_storage_manager(backend=image.storage_backend)
         
-        # TODO: Download image from storage
+        # Download image from storage
+        logger.debug(f"Downloading image from: {image.storage_key}")
+        # Note: Implement actual download in storage client
         # image_bytes = await storage.download(image.storage_key)
         
-        # TODO: Generate embedding using ML model
-        # from ml.embeddings import EmbeddingGenerator
-        # generator = EmbeddingGenerator(model_version=model_version.name)
-        # embedding_vector = generator.generate_image_embedding(image_bytes)
+        # For now, read from local path (implement actual download)
+        with open(f"{settings.MEDIA_ROOT}/{image.storage_key}", 'rb') as f:
+            image_bytes = f.read()
+
+        # Generate embedding
+        task = process_image_task
+        embedding_gen = task.embedding_generator
+
+        # Determine model type and variant from model_version
+        model_config = model_version.config or {}
+        model_type = model_config.get('type', 'clip')
+        model_variant = model_config.get('variant', 'ViT-B-32')
+
+        logger.info(f"Generating embedding with {model_type}/{model_variant}")
         
-        # Placeholder embedding (512-dim vector)
-        embedding_vector = [0.0] * 512
+        model = embedding_gen.get_model(
+            model_type=model_type,
+            model_variant=model_variant,
+            device=getattr(settings, 'EMBEDDING_DEVICE', 'cuda')
+        )
+        
+        start_time = time.time()
+        embedding_vector = model.encode_image(image_bytes)
+        inference_time = (time.time() - start_time) * 1000
+        
+        logger.info(f"Embedding generated in {inference_time:.2f}ms")
         
         # Generate unique vector point ID
         vector_point_id = f"img_{image.image_id}"
-        
-        # Get Qdrant client
-        # qdrant = QdrantClient(collection_name=image.tenant.vector_collection_name)
         
         # Prepare payload metadata
         payload = {
             'type': 'image',
             'image_id': image.id,  #type: ignore
-            'image_uuid': str(image.image_id),  
-            'tenant_id': str(image.tenant.id), #type: ignore
+            'image_uuid': str(image.image_id),   #type: ignore
+            'tenant_id': str(image.tenant.id),   #type: ignore
             'filename': image.filename,
             'plant_site': image.plant_site,
             'shift': image.shift,
@@ -70,42 +95,55 @@ def process_image_task(image_id: int):
             'height': image.height,
             'storage_key': image.storage_key,
             'storage_backend': image.storage_backend,
-            'model_version': model_version.name, #type: ignore
+            'model_version': model_version.name,
             
             # Video linkage if exists
-            'video_id': image.video.id if image.video else None,  #type: ignore
+            'video_id': image.video.id if image.video else None,     #type: ignore
             'video_uuid': str(image.video.video_id) if image.video else None,
             'frame_number': image.frame_number,
             'timestamp_in_video': image.timestamp_in_video,
         }
         
-        # TODO: Insert point into Qdrant
-        # qdrant.upsert_point(
-        #     point_id=vector_point_id,
-        #     vector=embedding_vector,
-        #     payload=payload
-        # )
+        # Get vector DB client
+        vector_db = task.get_vector_db_client(
+            collection_name=collection.collection_name,
+            dimension=model_version.vector_dimension
+        )
         
-        # Update image record (placeholder - would be done after actual embedding)
-        # image.embedding_generated = True
-        # image.embedding_model_version = model_version.name
-        # image.save(update_fields=['embedding_generated', 'embedding_model_version', 'updated_at'])
+        # Insert into vector DB
+        vector_point = VectorPoint(
+            id=vector_point_id,
+            vector=embedding_vector,
+            payload=payload
+        )
         
-        # Update status
+        vector_db.upsert([vector_point])
+        
+        logger.info(f"Vector stored: {vector_point_id}")
+        
+        # Update collection stats
+        collection.total_vectors += 1
+        collection.save(update_fields=['total_vectors', 'updated_at'])
+        
+        # Update image status (mark as embedded)
         image.status = StatusChoices.COMPLETED
         image.save(update_fields=['status', 'updated_at'])
         
-        logger.info(f"Image {image_id} embedding generated: {vector_point_id}")
+        logger.info(f"Image {image_id} embedding completed: {vector_point_id}")
         
-        # If image has detections, trigger detection embedding tasks
+        # Trigger detection embedding tasks if image has detections
         detection_ids = list(Detection.objects.filter(image=image).values_list('id', flat=True))
-        for detection_id in detection_ids:
-            process_detection_task.delay(detection_id)   # type: ignore
+        if detection_ids:
+            from embeddings.tasks.detection import process_detection_task
+            for detection_id in detection_ids:
+                process_detection_task.delay(detection_id)   #type: ignore
+            logger.info(f"Triggered {len(detection_ids)} detection embedding tasks")
         
         return {
             'status': 'success',
             'image_id': image_id,
             'vector_point_id': vector_point_id,
+            'inference_time_ms': inference_time,
             'detections_triggered': len(detection_ids)
         }
         

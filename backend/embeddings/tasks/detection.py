@@ -1,11 +1,18 @@
 # apps/embeddings/tasks/detection.py
 
 from celery import shared_task
-from embeddings.tasks.base import EmbeddingTask, get_active_model_version
+from embeddings.tasks.base import EmbeddingTask, get_active_model_version, get_or_create_collection
 from media.models import Detection, Image
 from infrastructure.storage.client import get_storage_manager
-# from infrastructure.qdrant.client import QdrantClient
+from infrastructure.embeddings.generator import EmbeddingGenerator
+from infrastructure.vectordb.base import VectorPoint
+from PIL import Image as PILImage
+
+from django.conf import settings
+import io
+import numpy as np
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +38,11 @@ def process_detection_task(detection_id: int):
         
         # Get active model version
         model_version = get_active_model_version()
+        if model_version is None:
+            raise ValueError("No active embedding model configured")
+        
+        # Get or create collection
+        collection = get_or_create_collection(detection.tenant, model_version)
         
         # Get storage manager
         storage = get_storage_manager(backend=detection.image.storage_backend)
@@ -38,43 +50,82 @@ def process_detection_task(detection_id: int):
         # TODO: Download parent image from storage
         # image_bytes = await storage.download(detection.image.storage_key)
         
-        # TODO: Crop detection region
-        # from ml.preprocessing import crop_detection_region
-        # cropped_bytes = crop_detection_region(
-        #     image_bytes,
-        #     bbox_x=detection.bbox_x,
-        #     bbox_y=detection.bbox_y,
-        #     bbox_width=detection.bbox_width,
-        #     bbox_height=detection.bbox_height,
-        #     bbox_format=detection.bbox_format,
-        #     image_width=detection.image.width,
-        #     image_height=detection.image.height
-        # )
+        # Download parent image
+        logger.debug(f"Downloading image from: {detection.image.storage_key}")
+        # Note: Implement actual download
+        with open(f"{settings.MEDIA_ROOT}/{detection.image.storage_key}", 'rb') as f:
+            image_bytes = f.read()
+
+        # Load image
+        image = PILImage.open(io.BytesIO(image_bytes)).convert('RGB')
+        image_array = np.array(image)
+        # Crop detection region
+        if detection.bbox_format == 'normalized':
+            # Convert normalized to absolute
+            x = int(detection.bbox_x * detection.image.width)
+            y = int(detection.bbox_y * detection.image.height)
+            w = int(detection.bbox_width * detection.image.width)
+            h = int(detection.bbox_height * detection.image.height)
+        else:
+            # Already absolute
+            x = int(detection.bbox_x)
+            y = int(detection.bbox_y)
+            w = int(detection.bbox_width)
+            h = int(detection.bbox_height)
         
-        # TODO: Optionally save cropped image
-        # if detection.storage_key:
-        #     await storage.save(detection.storage_key, cropped_bytes)
+        # Ensure bounds are valid
+        x = max(0, min(x, detection.image.width))
+        y = max(0, min(y, detection.image.height))
+        w = max(1, min(w, detection.image.width - x))
+        h = max(1, min(h, detection.image.height - y))
         
-        # TODO: Generate embedding from cropped region
-        # from ml.embeddings import EmbeddingGenerator
-        # generator = EmbeddingGenerator(model_version=model_version.name)
-        # embedding_vector = generator.generate_image_embedding(cropped_bytes)
+        # Crop
+        cropped_array = image_array[y:y+h, x:x+w]
+        cropped_image = PILImage.fromarray(cropped_array)
         
-        # Placeholder embedding (512-dim vector)
-        embedding_vector = [0.0] * 512
+        logger.debug(f"Cropped detection region: {w}x{h}")
+        
+        # Optionally save cropped image
+        if detection.storage_key:
+            # Save crop to storage
+            crop_buffer = io.BytesIO()
+            cropped_image.save(crop_buffer, format='JPEG', quality=95)
+            crop_bytes = crop_buffer.getvalue()
+            
+            # Upload to storage
+            # await storage.save(detection.storage_key, crop_bytes)
+            logger.debug(f"Saved crop to: {detection.storage_key}")
+        
+        # Generate embedding
+        task = process_detection_task
+        embedding_gen = task.embedding_generator
+        
+        # Get model config
+        model_config = model_version.config or {}
+        model_type = model_config.get('type', 'clip')
+        model_variant = model_config.get('variant', 'ViT-B-32')
+        
+        model = embedding_gen.get_model(
+            model_type=model_type,
+            model_variant=model_variant,
+            device=getattr(settings, 'EMBEDDING_DEVICE', 'cuda')
+        )
+        
+        start_time = time.time()
+        embedding_vector = model.encode_image(cropped_image)
+        inference_time = (time.time() - start_time) * 1000
+        
+        logger.info(f"Detection embedding generated in {inference_time:.2f}ms")
         
         # Generate unique vector point ID
         vector_point_id = f"det_{detection.detection_id}"
         
-        # Get Qdrant client
-        # qdrant = QdrantClient(collection_name=detection.tenant.vector_collection_name)
-        
         # Prepare payload metadata
         payload = {
-            'type': 'detection', 
-            'detection_id': detection.id,   #type: ignore
+            'type': 'detection',
+            'detection_id': detection.id,   # type: ignore
             'detection_uuid': str(detection.detection_id),
-            'tenant_id': str(detection.tenant.id), #type: ignore
+            'tenant_id': str(detection.tenant.id),   # type: ignore
             
             # Detection metadata
             'label': detection.label,
@@ -86,7 +137,7 @@ def process_detection_task(detection_id: int):
             'bbox_format': detection.bbox_format,
             
             # Image metadata
-            'image_id': detection.image.id,   #type: ignore
+            'image_id': detection.image.id,   # type: ignore
             'image_uuid': str(detection.image.image_id),
             'image_filename': detection.image.filename,
             'image_storage_key': detection.image.storage_key,
@@ -98,43 +149,58 @@ def process_detection_task(detection_id: int):
             'captured_at': detection.image.captured_at.isoformat(),
             
             # Video linkage if exists
-            'video_id': detection.image.video.id if detection.image.video else None,   #type: ignore
+            'video_id': detection.image.video.id if detection.image.video else None,   # type: ignore
             'video_uuid': str(detection.image.video.video_id) if detection.image.video else None,
             'frame_number': detection.image.frame_number,
             'timestamp_in_video': detection.image.timestamp_in_video,
             
             # Model info
-            'model_version': model_version.name,   #type: ignore
+            'model_version': model_version.name,
             
             # Tags
             'tags': list(detection.tags.values_list('name', flat=True))
         }
         
-        # TODO: Insert point into Qdrant
-        # qdrant.upsert_point(
-        #     point_id=vector_point_id,
-        #     vector=embedding_vector,
-        #     payload=payload
-        # )
+        # Get vector DB client
+        vector_db = task.get_vector_db_client(
+            collection_name=collection.collection_name,
+            dimension=model_version.vector_dimension
+        )
+        
+        # Insert into vector DB
+        vector_point = VectorPoint(
+            id=vector_point_id,
+            vector=embedding_vector,
+            payload=payload
+        )
+        
+        vector_db.upsert([vector_point])
+        
+        logger.info(f"Detection vector stored: {vector_point_id}")
+        
+        # Update collection stats
+        collection.total_vectors += 1
+        collection.save(update_fields=['total_vectors', 'updated_at'])
         
         # Update detection record
         detection.vector_point_id = vector_point_id
         detection.embedding_generated = True
-        detection.embedding_model_version = model_version.name   # type: ignore
+        detection.embedding_model_version = model_version.name
         detection.save(update_fields=[
             'vector_point_id',
-            'embedding_generated', 
+            'embedding_generated',
             'embedding_model_version',
             'updated_at'
         ])
         
-        logger.info(f"Detection {detection_id} embedding generated: {vector_point_id}")
+        logger.info(f"Detection {detection_id} embedding completed: {vector_point_id}")
         
         return {
             'status': 'success',
             'detection_id': detection_id,
             'vector_point_id': vector_point_id,
-            'label': detection.label
+            'label': detection.label,
+            'inference_time_ms': inference_time
         }
         
     except Detection.DoesNotExist:

@@ -1,6 +1,6 @@
 # apps/embeddings/tasks/batch.py
 
-from celery import shared_task, group
+from celery import shared_task, group, chord
 from embeddings.tasks.base import EmbeddingTask, get_active_model_version
 from embeddings.tasks.image import process_image_task
 from embeddings.tasks.detection import process_detection_task
@@ -47,14 +47,19 @@ def batch_process_images_task(tenant_id: str, filter_params: dict = None):   # t
         job = EmbeddingJob.objects.create(
             tenant=tenant,
             model_version=model_version,
-            total_detections=total_count,  # Reusing field for images
+            job_type='images',
+            total_items=total_count,  # Reusing field for images
             status='running',
             started_at=timezone.now()
         )
         
         # Create task group
         task_group = group(process_image_task.s(image_id) for image_id in image_ids)    # type: ignore
-        
+
+        # Execute tasks with callback
+        callback = finalize_batch_job.s(job_id=str(job.id))
+        chord(task_group)(callback)
+
         # Execute tasks
         result = task_group.apply_async()
         
@@ -73,7 +78,7 @@ def batch_process_images_task(tenant_id: str, filter_params: dict = None):   # t
 
 
 @shared_task(base=EmbeddingTask, name='embeddings.batch_process_detections')
-def batch_process_detections_task(tenant_id: str, filter_params: dict = None):   # type: ignore
+def batch_process_detections_task(tenant_id: str, filter_params: dict = None):
     """
     Batch process multiple detections for embedding generation.
     
@@ -92,7 +97,7 @@ def batch_process_detections_task(tenant_id: str, filter_params: dict = None):  
         model_version = get_active_model_version()
         
         # Build queryset
-        queryset = Detection.objects.filter(tenant=tenant)
+        queryset = Detection.objects.filter(tenant=tenant, embedding_generated=False)
         
         if filter_params:
             queryset = queryset.filter(**filter_params)
@@ -107,28 +112,95 @@ def batch_process_detections_task(tenant_id: str, filter_params: dict = None):  
         job = EmbeddingJob.objects.create(
             tenant=tenant,
             model_version=model_version,
-            total_detections=total_count,
+            job_type='detections',
+            total_items=total_count,
             status='running',
             started_at=timezone.now()
         )
         
-        # Create task group
-        task_group = group(process_detection_task.s(detection_id) for detection_id in detection_ids)    # type: ignore
+        # Process in chunks to avoid overwhelming the queue
+        chunk_size = 100
+        task_groups = []
         
-        # Execute tasks
-        result = task_group.apply_async()
+        for i in range(0, len(detection_ids), chunk_size):
+            chunk = detection_ids[i:i + chunk_size]
+            task_group = group(process_detection_task.s(det_id) for det_id in chunk)
+            task_groups.append(task_group)
         
-        logger.info(f"Batch job {job.id} started: {total_count} detection tasks queued")    #type: ignore
+        # Execute chunks with callback
+        for task_group in task_groups:
+            task_group.apply_async()
+        
+        # Schedule job finalization
+        finalize_batch_job.apply_async(
+            args=[None],
+            kwargs={'job_id': str(job.id)},
+            countdown=60  # Check after 1 minute
+        )
+        
+        logger.info(f"Batch job {job.id} started: {total_count} detection tasks queued")
         
         return {
             'status': 'started',
-            'job_id': str(job.id),    #type: ignore
-            'total_detections': total_count,
-            'task_group_id': result.id
+            'job_id': str(job.id),
+            'total_detections': total_count
         }
         
     except Exception as e:
         logger.error(f"Failed to start batch detection processing: {str(e)}")
+        raise
+
+@shared_task(name='embeddings.finalize_batch_job')
+def finalize_batch_job(results, job_id: str):
+    """
+    Finalize batch embedding job.
+    Called as chord callback.
+    
+    Args:
+        results: Results from task group
+        job_id: EmbeddingJob UUID
+    """
+    try:
+        job = EmbeddingJob.objects.get(id=job_id)
+        
+        # Count successes and failures
+        if results:
+            successful = sum(1 for r in results if r and r.get('status') == 'success')
+            failed = len(results) - successful
+        else:
+            # If called manually, check database
+            if job.job_type == 'images':
+                successful = Image.objects.filter(
+                    tenant=job.tenant,
+                    status='completed'
+                ).count()
+            else:
+                successful = Detection.objects.filter(
+                    tenant=job.tenant,
+                    embedding_generated=True
+                ).count()
+            failed = job.total_items - successful
+        
+        # Update job
+        job.processed_items = successful
+        job.failed_items = failed
+        job.status = 'completed' if failed == 0 else 'completed'
+        job.completed_at = timezone.now()
+        job.save()
+        
+        logger.info(
+            f"Batch job {job_id} completed: "
+            f"{successful} successful, {failed} failed"
+        )
+        
+        return {
+            'job_id': job_id,
+            'successful': successful,
+            'failed': failed
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to finalize batch job {job_id}: {str(e)}")
         raise
 
 
