@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task(base=EmbeddingTask, name='embeddings.process_image')
-def process_image_task(image_id: int):
+async def process_image_task(image_id: int):
     """
     Process image: generate embedding and store in vector DB.
     
@@ -48,11 +48,7 @@ def process_image_task(image_id: int):
         # Download image from storage
         logger.debug(f"Downloading image from: {image.storage_key}")
         # Note: Implement actual download in storage client
-        # image_bytes = await storage.download(image.storage_key)
-        
-        # For now, read from local path (implement actual download)
-        with open(f"{settings.MEDIA_ROOT}/{image.storage_key}", 'rb') as f:
-            image_bytes = f.read()
+        image_bytes = await storage.download(image.storage_key)
 
         # Generate embedding
         task = process_image_task
@@ -65,7 +61,7 @@ def process_image_task(image_id: int):
 
         logger.info(f"Generating embedding with {model_type}/{model_variant}")
         
-        model = embedding_gen.get_model(
+        model = embedding_gen.get_model(  # type: ignore
             model_type=model_type,
             model_variant=model_variant,
             device=getattr(settings, 'EMBEDDING_DEVICE', 'cuda')
@@ -105,7 +101,7 @@ def process_image_task(image_id: int):
         }
         
         # Get vector DB client
-        vector_db = task.get_vector_db_client(
+        vector_db = task.get_vector_db_client(   # type: ignore
             collection_name=collection.collection_name,
             dimension=model_version.vector_dimension
         )

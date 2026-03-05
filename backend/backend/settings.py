@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'search',
     'media',
     'embeddings',
+    'api_keys',
 ]
 
 MIDDLEWARE = [

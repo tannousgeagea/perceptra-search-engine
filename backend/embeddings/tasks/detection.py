@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task(base=EmbeddingTask, name='embeddings.process_detection')
-def process_detection_task(detection_id: int):
+async def process_detection_task(detection_id: int):
     """
     Process detection: crop region, generate embedding, store in vector DB.
     
@@ -48,13 +48,11 @@ def process_detection_task(detection_id: int):
         storage = get_storage_manager(backend=detection.image.storage_backend)
         
         # TODO: Download parent image from storage
-        # image_bytes = await storage.download(detection.image.storage_key)
+        image_bytes = await storage.download(detection.image.storage_key)
         
         # Download parent image
         logger.debug(f"Downloading image from: {detection.image.storage_key}")
-        # Note: Implement actual download
-        with open(f"{settings.MEDIA_ROOT}/{detection.image.storage_key}", 'rb') as f:
-            image_bytes = f.read()
+
 
         # Load image
         image = PILImage.open(io.BytesIO(image_bytes)).convert('RGB')
@@ -105,7 +103,7 @@ def process_detection_task(detection_id: int):
         model_type = model_config.get('type', 'clip')
         model_variant = model_config.get('variant', 'ViT-B-32')
         
-        model = embedding_gen.get_model(
+        model = embedding_gen.get_model(    # type: ignore
             model_type=model_type,
             model_variant=model_variant,
             device=getattr(settings, 'EMBEDDING_DEVICE', 'cuda')
@@ -162,7 +160,7 @@ def process_detection_task(detection_id: int):
         }
         
         # Get vector DB client
-        vector_db = task.get_vector_db_client(
+        vector_db = task.get_vector_db_client(     #type: ignore
             collection_name=collection.collection_name,
             dimension=model_version.vector_dimension
         )

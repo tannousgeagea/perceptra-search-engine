@@ -1,6 +1,6 @@
 # apps/tenants/context.py
 
-from typing import Optional
+from typing import Optional, Any
 from fastapi import HTTPException, status
 from tenants.models import Tenant, TenantMembership
 from django.contrib.auth import get_user_model
@@ -15,12 +15,16 @@ class RequestContext:
         self,
         user: User,    #type: ignore
         tenant: Tenant,
-        membership: TenantMembership
+        membership: TenantMembership,
+        api_key: Optional[Any] = None,
+        auth_method:Optional[str] = 'jwt'
     ):
         self.user = user
         self.tenant = tenant
         self.membership = membership
         self.role = membership.role
+        self.api_key = api_key
+        self.auth_method = auth_method
     
     def has_role(self, *role_names: str) -> bool:
         """Check if user has any of the specified roles."""

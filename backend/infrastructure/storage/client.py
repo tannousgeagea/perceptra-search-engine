@@ -2,6 +2,7 @@
 
 from typing import Optional, BinaryIO
 import os
+from pathlib import Path
 from django.conf import settings
 from perceptra_storage import get_storage_adapter
 from media.models import StorageBackend as StorageBackendChoice
@@ -165,6 +166,39 @@ class StorageManager:
             logger.error(f"Failed to check existence of {storage_key}: {str(e)}")
             return False
     
+    async def download(self, storage_key: str, destination: Optional[Path] = None) -> bytes:
+        """
+        Download file from storage.
+        
+        Args:
+            storage_key: File path/key to download
+            destination: Optional local path to save the file
+            
+        Returns:
+            File content as bytes (if destination is None)
+        """
+        try:
+            if not self._client:
+                raise RuntimeError("Storage client is not initialized.")
+            
+            logger.info(f"Downloading file: {storage_key}")
+            
+            # Download file using perceptra-storage
+            # If destination is provided, it saves to file and returns bytes
+            # If destination is None, it just returns bytes
+            content = self._client.download_file(
+                key=storage_key,
+                destination=destination
+            )
+            
+            logger.info(f"File downloaded: {storage_key} ({len(content)} bytes)")
+            
+            return content
+            
+        except Exception as e:
+            logger.error(f"Failed to download {storage_key}: {str(e)}")
+        raise
+
     async def get_download_url(self, storage_key: str, expiry: int = 3600) -> str:
         """
         Generate pre-signed download URL.

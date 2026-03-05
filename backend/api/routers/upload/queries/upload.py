@@ -6,7 +6,7 @@ from datetime import datetime
 from tenants.context import RequestContext
 from media.models import Video, Image, Detection, StorageBackend as StorageBackendChoice
 from media.utils import get_or_create_tags
-from api.dependencies import get_request_context
+from api.dependencies import get_request_context, require_permission
 from api.routers.upload.schemas import (
     VideoUploadResponse,
     ImageUploadResponse,
@@ -36,7 +36,7 @@ async def upload_video(
     inspection_line: Annotated[Optional[str], Form()] = None,
     tags: Annotated[Optional[str], Form()] = None,  # JSON string of tags
     storage_backend: Annotated[Optional[str], Form()] = None,
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_permission('write'))
 ):
     """
     Upload video file for inspection.
@@ -192,7 +192,7 @@ async def upload_image(
     frame_number: Annotated[Optional[int], Form()] = None,
     tags: Annotated[Optional[str], Form()] = None,
     storage_backend: Annotated[Optional[str], Form()] = None,
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_permission('write'))
 ):
     """
     Upload image file for inspection.
@@ -364,7 +364,7 @@ async def upload_image(
 @router.post("/detection", response_model=DetectionResponse, status_code=status.HTTP_201_CREATED)
 async def create_detection(
     request: DetectionCreateRequest,
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_permission('write'))
 ):
     """
     Create a single detection for an image.
@@ -467,7 +467,7 @@ async def create_detection(
 @router.post("/detections/bulk", response_model=BulkDetectionResponse, status_code=status.HTTP_201_CREATED)
 async def create_detections_bulk(
     request: BulkDetectionCreateRequest,
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_permission('write'))
 ):
     """
     Create multiple detections at once.

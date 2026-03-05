@@ -5,7 +5,7 @@ from typing import Annotated, List
 from tenants.context import RequestContext
 from media.models import Image, Detection
 from search.services import SearchService
-from api.dependencies import get_request_context
+from api.dependencies import get_request_context, require_scope
 from api.routers.search.schemas import (
     ImageSearchRequest,
     TextSearchRequest,
@@ -86,7 +86,7 @@ def _build_detection_result(result_payload: dict, score: float) -> DetectionSear
 async def search_by_image(
     file: Annotated[UploadFile, File(...)],
     request: ImageSearchRequest = Depends(),
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_scope('search'))
 ):
     """
     Search by uploading an image.
@@ -160,7 +160,7 @@ async def search_by_image(
 @router.post("/text", response_model=SearchResponse)
 async def search_by_text(
     request: TextSearchRequest,
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_scope('search'))
 ):
     """
     Search by text query.
@@ -226,7 +226,7 @@ async def search_by_text(
 async def search_hybrid(
     file: Annotated[UploadFile, File(...)],
     request: HybridSearchRequest = Depends(),
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_scope("search"))
 ):
     """
     Hybrid search combining image and text.
@@ -303,7 +303,7 @@ async def search_hybrid(
 @router.post("/similar", response_model=SearchResponse)
 async def search_similar(
     request: SimilaritySearchRequest,
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_scope('search'))
 ):
     """
     Find items similar to a given image or detection.
@@ -368,7 +368,7 @@ async def search_similar(
 async def get_search_history(
     limit: int = 20,
     offset: int = 0,
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_scope('search'))
 ):
     """
     Get user's search history.
@@ -396,7 +396,7 @@ async def get_search_history(
 
 @router.get("/stats", response_model=SearchStatsResponse)
 async def get_search_stats(
-    ctx: RequestContext = Depends(get_request_context)
+    ctx: RequestContext = Depends(require_scope('search'))
 ):
     """
     Get search statistics for the tenant.
