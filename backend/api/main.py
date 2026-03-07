@@ -103,4 +103,4 @@ async def internal_server_error_handler(request: Request, exc: Exception):
 
 if __name__ == "__main__":
     import os
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv('DATA_API_PORT', 8000)), log_level="debug", reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv('SEARCH_ENGINE_PORT', 8000)), log_level="debug", reload=True)

@@ -38,8 +38,9 @@ class APIKeyResponse(BaseModel):
     total_requests: int
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True
+    }
 
 
 class APIKeyWithSecret(BaseModel):
@@ -95,7 +96,7 @@ async def create_api_key(
     )
     
     return APIKeyWithSecret(
-        api_key=APIKeyResponse.from_orm(api_key),
+        api_key=APIKeyResponse.model_validate(api_key),
         secret_key=secret_key
     )
 
@@ -128,7 +129,7 @@ async def list_api_keys(
     
     api_keys = await sync_to_async(list)(queryset.order_by('-created_at'))
     
-    return [APIKeyResponse.from_orm(key) for key in api_keys]
+    return [APIKeyResponse.model_validate(key) for key in api_keys]
 
 
 @router.get("/{key_id}", response_model=APIKeyResponse)
@@ -155,7 +156,7 @@ async def get_api_key(
             detail="API key not found"
         )
     
-    return APIKeyResponse.from_orm(api_key)
+    return APIKeyResponse.model_validate(api_key)
 
 
 @router.patch("/{key_id}", response_model=APIKeyResponse)
@@ -207,7 +208,7 @@ async def update_api_key(
     from django.core.cache import cache
     cache.delete(f"api_key:{api_key.key_prefix}")
     
-    return APIKeyResponse.from_orm(api_key)
+    return APIKeyResponse.model_validate(api_key)
 
 
 @router.delete("/{key_id}")

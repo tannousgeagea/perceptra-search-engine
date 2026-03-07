@@ -48,6 +48,12 @@ RUN pip3 install perceptra-storage[all]
 RUN pip3 install pyjwt
 RUN pip3 install python-dotenv
 
+RUN pip3 install open_clip_torch>=2.20.0
+RUN pip3 install faiss-cpu>=1.7.4
+RUN pip3 install qdrant-client>=1.7.0
+
+RUN pip3 install opencv-python>=4.8.0
+
 # upgrade everything
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -q -y \
    && rm -rf /var/lib/apt/lists/*

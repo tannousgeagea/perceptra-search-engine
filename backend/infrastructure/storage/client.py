@@ -89,7 +89,7 @@ class StorageManager:
             self._client = get_storage_adapter(
                 backend='local',
                 config={
-                    'base_path': os.path.join(settings.BASE_DIR, 'local_storage'),
+                    'base_path': settings.STORAGE_PATH,
                     'create_dirs': True
                 },
                 credentials={}

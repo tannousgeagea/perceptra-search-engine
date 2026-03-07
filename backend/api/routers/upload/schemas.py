@@ -19,8 +19,10 @@ class TagResponse(BaseModel):
     description: Optional[str]
     color: str
     
-    class Config:
-        from_attributes = True
+    # enable attribute loading (ORM style) in Pydantic v2
+    model_config = {
+        "from_attributes": True
+    }
 
 
 class VideoUploadResponse(BaseModel):
@@ -40,8 +42,10 @@ class VideoUploadResponse(BaseModel):
     tags: List[TagResponse] = []
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    # enable attribute loading (ORM style) in Pydantic v2
+    model_config = {
+        "from_attributes": True
+    }
 
 
 class ImageUploadResponse(BaseModel):
@@ -65,8 +69,10 @@ class ImageUploadResponse(BaseModel):
     status: str
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    # enable attribute loading (ORM style) in Pydantic v2
+    model_config = {
+        "from_attributes": True
+    }
 
 
 class DetectionCreateRequest(BaseModel):
@@ -101,8 +107,10 @@ class DetectionResponse(BaseModel):
     tags: List[TagResponse] = []
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    # enable attribute loading (ORM style) in Pydantic v2
+    model_config = {
+        "from_attributes": True
+    }
 
 
 class BulkDetectionCreateRequest(BaseModel):
@@ -111,9 +119,11 @@ class BulkDetectionCreateRequest(BaseModel):
 
 
 class BulkDetectionResponse(BaseModel):
-    """Response after bulk detection creation"""
+    """Response after bulk detection creation."""
     total: int
     created: int
+    skipped: int = 0  # Duplicates that were skipped
     failed: int
     detection_ids: List[int]
+    skipped_ids: List[int] = []  # IDs of existing detections
     errors: List[str]

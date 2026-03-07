@@ -22,7 +22,8 @@ class RequestContext:
         self.user = user
         self.tenant = tenant
         self.membership = membership
-        self.role = membership.role
+        if self.membership:
+            self.role = membership.role
         self.api_key = api_key
         self.auth_method = auth_method
     

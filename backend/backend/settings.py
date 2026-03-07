@@ -133,6 +133,7 @@ USE_TZ = True
 
 # Storage Configuration
 STORAGE_BACKEND = env('STORAGE_BACKEND', 'local')  # 'azure', 's3', 'minio', 'local'
+STORAGE_PATH  = env('STORAGE_PATH', 'local_storage')
 
 # Azure Blob Storage
 AZURE_STORAGE_CONNECTION_STRING = env('AZURE_STORAGE_CONNECTION_STRING', '')
@@ -258,6 +259,26 @@ UNFOLD = {
                         "link": reverse_lazy(
                             "admin:tenants_tenantmembership_changelist"
                         ),
+                    },
+                ],
+            },
+
+            # ─────────────────────────────
+            # API Keys
+            # ─────────────────────────────
+            {
+                "title": _("API Keys"),
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("API Keys"),
+                        "icon": "key",
+                        "link": reverse_lazy("admin:api_keys_apikey_changelist"),
+                    },
+                    {
+                        "title": _("API Usage"),
+                        "icon": "chart_data",
+                        "link": reverse_lazy("admin:api_keys_apikeyusagelog_changelist"),
                     },
                 ],
             },

@@ -88,6 +88,19 @@ class Video(TenantScopedModel):
         help_text=_('Full path/key in storage (e.g., org-123/images/2025/img.jpg)')
     )
 
+    # Checksum for integrity verification
+    checksum = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        help_text=_('SHA-256 checksum of file')
+    )
+
+    file_format = models.CharField(
+        max_length=10,
+        help_text=_('Image format (mp4, avi, mov, webm, etc.)')
+    )
+
     tags = models.ManyToManyField('Tag', through='VideoTag', related_name='videos', blank=True)
 
     class Meta:
@@ -245,6 +258,11 @@ class Image(TenantScopedModel):
         null=True,
         blank=True,
         help_text=_('SHA-256 checksum of file')
+    )
+
+    file_format = models.CharField(
+        max_length=10,
+        help_text=_('Image format (jpg, png, tiff, etc.)')
     )
     
     tags = models.ManyToManyField('Tag', through='ImageTag', related_name='images', blank=True)
@@ -562,6 +580,7 @@ class Tag(models.Model):
     
     description = models.TextField(
         blank=True,
+        null=True,
         help_text=_('Tag description')
     )
     

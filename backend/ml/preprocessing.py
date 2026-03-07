@@ -2,6 +2,7 @@
 
 from PIL import Image
 import io
+import hashlib
 from typing import Tuple
 
 
@@ -55,3 +56,11 @@ async def validate_video(video_bytes: bytes) -> bool:
         return True
     
     return False
+
+def calculate_checksum(file_data: bytes) -> str:
+    """Calculate SHA-256 checksum of file."""
+    return hashlib.sha256(file_data).hexdigest()
+
+def get_image_format(filename: str) -> str:
+    """Extract file format from filename."""
+    return filename.rsplit('.', 1)[-1].lower() if '.' in filename else 'unknown'

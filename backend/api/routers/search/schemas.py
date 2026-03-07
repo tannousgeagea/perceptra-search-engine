@@ -93,8 +93,10 @@ class ImageSearchResult(BaseModel):
     # Download URL
     download_url: Optional[str] = None
     
-    class Config:
-        from_attributes = True
+    # enable attribute loading (ORM style) in Pydantic v2
+    model_config = {
+        "from_attributes": True
+    }
 
 
 class DetectionSearchResult(BaseModel):
@@ -133,8 +135,10 @@ class DetectionSearchResult(BaseModel):
     image_url: Optional[str] = None
     crop_url: Optional[str] = None
     
-    class Config:
-        from_attributes = True
+    # enable attribute loading (ORM style) in Pydantic v2
+    model_config = {
+        "from_attributes": True
+    }
 
 
 class SearchResponse(BaseModel):
@@ -164,8 +168,10 @@ class SearchHistoryItem(BaseModel):
     execution_time_ms: int
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    # enable attribute loading (ORM style) in Pydantic v2
+    model_config = {
+        "from_attributes": True
+    }
 
 
 class SearchStatsResponse(BaseModel):
