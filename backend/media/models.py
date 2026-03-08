@@ -1,5 +1,6 @@
 # apps/media/models.py
 
+import hashlib
 from django.db import models
 from tenants.models import Tenant
 from tenants.managers import TenantManager
@@ -24,6 +25,15 @@ class StatusChoices(models.TextChoices):
     PROCESSING = 'processing', _('Processing')
     COMPLETED = 'completed', _('Completed')
     FAILED = 'failed', _('Failed')
+
+class MediaType(models.TextChoices):
+    """Types of media."""
+    VIDEO = 'video', _('Video')
+    IMAGE = 'image', _('Image')
+    DETECTION = 'detection', _('Detection Crop')
+    AUDIO = 'audio', _('Audio')  # Future
+    DOCUMENT = 'document', _('Document')  # Future
+
 
 class TenantScopedModel(models.Model):
     """Abstract base for tenant-scoped models"""
@@ -56,6 +66,123 @@ class TenantScopedModel(models.Model):
 
     class Meta:
         abstract = True
+
+class Media(TenantScopedModel):
+    """
+    Unified media storage model.
+    Represents any file stored in the system (video, image, detection crop, etc.)
+    """
+    
+    id = models.BigAutoField(primary_key=True)
+    media_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, db_index=True)
+    
+    # Media type
+    media_type = models.CharField(
+        max_length=20,
+        choices=MediaType.choices,
+        db_index=True,
+        help_text=_('Type of media')
+    )
+    
+    # Storage information
+    storage_backend = models.CharField(
+        max_length=20,
+        choices=StorageBackend.choices,
+        help_text=_('Storage backend type')
+    )
+    storage_key = models.CharField(
+        max_length=500,
+        help_text=_('Full path/key in storage')
+    )
+    
+    # File metadata
+    filename = models.CharField(max_length=255)
+    file_size_bytes = models.BigIntegerField()
+    content_type = models.CharField(
+        max_length=100,
+        default='application/octet-stream',
+        help_text=_('MIME type')
+    )
+    
+    # Integrity
+    checksum = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        help_text=_('SHA-256 checksum')
+    )
+
+    file_format = models.CharField(
+        max_length=10,
+        help_text=_('File format (mp4, avi, mov, webm, etc.)')
+    )
+    
+    # Status
+    status = models.CharField(
+        max_length=20,
+        choices=StatusChoices.choices,
+        default=StatusChoices.UPLOADED,
+        db_index=True
+    )
+    
+    # Soft delete
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'media'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['tenant', 'media_type', 'status']),
+            models.Index(fields=['storage_backend', 'storage_key']),
+            models.Index(fields=['tenant', 'created_at']),
+            models.Index(fields=['media_type', 'is_deleted']),
+            models.Index(fields=['checksum']),
+        ]
+        unique_together = [('tenant', 'storage_key')]
+    
+    def __str__(self):
+        return f"{self.get_media_type_display()} - {self.filename}" # type: ignore
+    
+    @property
+    def file_size_mb(self) -> float:
+        """Get file size in megabytes."""
+        return self.file_size_bytes / (1024 * 1024)
+    
+    def get_download_url(self, expiry: int = 3600) -> str:
+        """Generate pre-signed download URL."""
+        from infrastructure.storage.client import get_storage_manager
+        
+        storage = get_storage_manager(backend=self.storage_backend)
+        
+        # Sync wrapper for async method
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        return loop.run_until_complete(
+            storage.get_download_url(self.storage_key, expiry)
+        )
+    
+    def calculate_checksum(self, content: bytes) -> str:
+        """Calculate and set checksum."""
+        self.checksum = hashlib.sha256(content).hexdigest()
+        return self.checksum
+    
+    def soft_delete(self):
+        """Soft delete the media."""
+        from django.utils import timezone
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['is_deleted', 'deleted_at', 'updated_at'])
+    
+    def clean(self):
+        """Validate media instance."""
+        if self.file_size_bytes < 0:
+            raise ValidationError({'file_size_bytes': _('File size cannot be negative')})
 
 
 class Video(TenantScopedModel):
