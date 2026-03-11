@@ -1,6 +1,9 @@
 import logging
+import os
+from os import getenv as env
 import time
 from typing import Union, List, Optional
+import subprocess
 
 import numpy as np
 from PIL import Image
@@ -54,7 +57,16 @@ class SAM3Embedding(BaseEmbeddingModel):
                 f"Invalid SAM3 variant: {model_variant}. "
                 f"Available: {list(self.AVAILABLE_MODELS.keys())}"
             )
-        
+
+        sam3_dir = "/opt/checkpoints/sam3"
+        weight_file = os.path.join(sam3_dir, "sam3.pt")
+        config_file = os.path.join(sam3_dir, "config.json")
+         # Skip download if files exist
+        if os.path.exists(weight_file) and os.path.exists(config_file):
+            logging.info("SAM3 weights already exist. Skipping download.")
+        else:
+            self._download_weights(sam3_dir)
+
         self.model_variant = model_variant
         self.model_config = self.AVAILABLE_MODELS[model_variant]
         self._embedding_dim = self.model_config['embedding_dim']
@@ -65,13 +77,46 @@ class SAM3Embedding(BaseEmbeddingModel):
             device=device,
             **kwargs
         )
-       
+
+    def _download_weights(self, sam3_dir):
+        weight_file = os.path.join(sam3_dir, "sam3.pt")
+        config_file = os.path.join(sam3_dir, "config.json")
+
+        os.makedirs(sam3_dir)
+
+        # Skip download if files exist
+        if os.path.exists(weight_file) and os.path.exists(config_file):
+            logging.info("SAM3 weights already exist. Skipping download.")
+            return
+
+        hf_token = env("HF_TOKEN", None)
+        if hf_token is None:
+            raise ValueError("HF_TOKEN should be set in environmental variables")
+
+        logging.info("Downloading SAM3 weights...")
+
+        subprocess.run(
+            [
+                "hf",
+                "download",
+                "--token",
+                hf_token,
+                "facebook/sam3",
+                "sam3.pt",
+                "config.json",
+                "--local-dir",
+                sam3_dir,
+            ],
+            check=True,
+        )
+
+        logging.info("SAM3 weights downloaded.")
+    
     def load(self):
         start_time = time.time()
         try:    
-            bpe_path = f"/opt/checkpoints/sam3/bpe_simple_vocab_16e6.txt.gz"
             self.model = build_sam3_image_model(
-                bpe_path=bpe_path, 
+                bpe_path=None, 
                 device=self.device_str,
                 enable_inst_interactivity=False,
                 checkpoint_path="/opt/checkpoints/sam3/sam3.pt",
