@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Annotated, List, Optional
+from django.db.models import Count
 from tenants.context import RequestContext
 from media.models import Video, Image, Detection, Tag
 from media.services import MediaLibraryService
@@ -266,14 +267,24 @@ async def list_tags(
     List all tags for the tenant with usage counts.
     """
     tags = await sync_to_async(list)(
-        Tag.objects.filter(tenant=ctx.tenant).order_by('name')
+        Tag.objects.filter(tenant=ctx.tenant)
+        .annotate(
+            image_count=Count('images', distinct=True),
+            video_count=Count('videos', distinct=True),
+            detection_count=Count('detections', distinct=True),
+        )
+        .order_by('name')
     )
     
     tag_responses = []
     for tag in tags:
-        usage_count = await sync_to_async(lambda: tag.usage_count)()
         tag_response = TagResponse.model_validate(tag)
-        tag_response.usage_count = usage_count
+        tag_response.usage_count = {
+            'images': tag.image_count,         # type: ignore
+            'videos': tag.video_count,         # type: ignore
+            'detections': tag.detection_count, # type: ignore
+            'total': tag.image_count + tag.video_count + tag.detection_count,  # type: ignore
+        }
         tag_responses.append(tag_response)
     
     return tag_responses

@@ -366,12 +366,54 @@ class SearchService:
             # Get vector point ID
             if item_type == 'image':
                 image = Image.objects.get(id=item_id, tenant=self.tenant)
-                vector_point_id = f"img_{image.image_id}"
+
+                # Primary guard: fast, no network call
+                if not image.has_embedding:
+                    raise ValueError(
+                        f"Image {item_id} has no embedding. "
+                        "Run the embedding pipeline for this image first."
+                    )
+
+
+                vector_point_id = image.vector_point_id
+
+                # Secondary guard: catches vector store / model flag inconsistency
+                # (e.g. collection rebuilt, manual Qdrant deletion)
+                points = vector_db.get([vector_point_id])
+                if not points:
+                    # Flag is stale — reset it so the next pipeline run re-embeds
+                    Image.objects.filter(pk=image.pk).update(
+                        embedding_generated=False,
+                        vector_point_id=None,
+                        embedding_model_version=None,
+                    )
+                    raise ValueError(
+                        f"Image {item_id} embedding flag is set but the vector is missing "
+                        "from the store. The flag has been reset — re-run the pipeline."
+                    )
+                
             elif item_type == 'detection':
                 detection = Detection.objects.get(id=item_id, tenant=self.tenant)
-                if not detection.vector_point_id:
-                    raise ValueError(f"Detection {item_id} has no embedding generated")
+              
+                if not detection.has_embedding:
+                    raise ValueError(
+                        f"Detection {item_id} has no embedding. "
+                        "Run the embedding pipeline for this detection first."
+                    )
+
                 vector_point_id = detection.vector_point_id
+
+                points = vector_db.get([vector_point_id])
+                if not points:
+                    Detection.objects.filter(pk=detection.pk).update(
+                        embedding_generated=False,
+                        vector_point_id=None,
+                        embedding_model_version=None,
+                    )
+                    raise ValueError(
+                        f"Detection {item_id} embedding flag is set but the vector is missing "
+                        "from the store. The flag has been reset — re-run the pipeline."
+                )
             else:
                 raise ValueError(f"Invalid item type: {item_type}")
             

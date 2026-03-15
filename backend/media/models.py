@@ -1,5 +1,7 @@
 # apps/media/models.py
 
+import hashlib
+from typing import Optional
 from django.db import models
 from tenants.models import Tenant
 from tenants.managers import TenantManager
@@ -24,6 +26,15 @@ class StatusChoices(models.TextChoices):
     PROCESSING = 'processing', _('Processing')
     COMPLETED = 'completed', _('Completed')
     FAILED = 'failed', _('Failed')
+
+class MediaType(models.TextChoices):
+    """Types of media."""
+    VIDEO = 'video', _('Video')
+    IMAGE = 'image', _('Image')
+    DETECTION = 'detection', _('Detection Crop')
+    AUDIO = 'audio', _('Audio')  # Future
+    DOCUMENT = 'document', _('Document')  # Future
+
 
 class TenantScopedModel(models.Model):
     """Abstract base for tenant-scoped models"""
@@ -56,6 +67,123 @@ class TenantScopedModel(models.Model):
 
     class Meta:
         abstract = True
+
+class Media(TenantScopedModel):
+    """
+    Unified media storage model.
+    Represents any file stored in the system (video, image, detection crop, etc.)
+    """
+    
+    id = models.BigAutoField(primary_key=True)
+    media_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, db_index=True)
+    
+    # Media type
+    media_type = models.CharField(
+        max_length=20,
+        choices=MediaType.choices,
+        db_index=True,
+        help_text=_('Type of media')
+    )
+    
+    # Storage information
+    storage_backend = models.CharField(
+        max_length=20,
+        choices=StorageBackend.choices,
+        help_text=_('Storage backend type')
+    )
+    storage_key = models.CharField(
+        max_length=500,
+        help_text=_('Full path/key in storage')
+    )
+    
+    # File metadata
+    filename = models.CharField(max_length=255)
+    file_size_bytes = models.BigIntegerField()
+    content_type = models.CharField(
+        max_length=100,
+        default='application/octet-stream',
+        help_text=_('MIME type')
+    )
+    
+    # Integrity
+    checksum = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        help_text=_('SHA-256 checksum')
+    )
+
+    file_format = models.CharField(
+        max_length=10,
+        help_text=_('File format (mp4, avi, mov, webm, etc.)')
+    )
+    
+    # Status
+    status = models.CharField(
+        max_length=20,
+        choices=StatusChoices.choices,
+        default=StatusChoices.UPLOADED,
+        db_index=True
+    )
+    
+    # Soft delete
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'media'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['tenant', 'media_type', 'status']),
+            models.Index(fields=['storage_backend', 'storage_key']),
+            models.Index(fields=['tenant', 'created_at']),
+            models.Index(fields=['media_type', 'is_deleted']),
+            models.Index(fields=['checksum']),
+        ]
+        unique_together = [('tenant', 'storage_key')]
+    
+    def __str__(self):
+        return f"{self.get_media_type_display()} - {self.filename}" # type: ignore
+    
+    @property
+    def file_size_mb(self) -> float:
+        """Get file size in megabytes."""
+        return self.file_size_bytes / (1024 * 1024)
+    
+    def get_download_url(self, expiry: int = 3600) -> str:
+        """Generate pre-signed download URL."""
+        from infrastructure.storage.client import get_storage_manager
+        
+        storage = get_storage_manager(backend=self.storage_backend)
+        
+        # Sync wrapper for async method
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        return loop.run_until_complete(
+            storage.get_download_url(self.storage_key, expiry)
+        )
+    
+    def calculate_checksum(self, content: bytes) -> str:
+        """Calculate and set checksum."""
+        self.checksum = hashlib.sha256(content).hexdigest()
+        return self.checksum
+    
+    def soft_delete(self):
+        """Soft delete the media."""
+        from django.utils import timezone
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['is_deleted', 'deleted_at', 'updated_at'])
+    
+    def clean(self):
+        """Validate media instance."""
+        if self.file_size_bytes < 0:
+            raise ValidationError({'file_size_bytes': _('File size cannot be negative')})
 
 
 class Video(TenantScopedModel):
@@ -118,7 +246,8 @@ class Video(TenantScopedModel):
 
 
     def __str__(self) -> str:
-        return f"Video {self.filename} ({self.duration_seconds:.2f}s)"
+        duration = f"{self.duration_seconds:.2f}s" if self.duration_seconds is not None else "unknown duration"
+        return f"Video {self.filename} ({duration})"
     
     def clean(self):
         """Custom validation to ensure data integrity."""
@@ -129,7 +258,8 @@ class Video(TenantScopedModel):
     
     def save(self, *args, **kwargs):
         """Override save to include validation."""
-        self.full_clean()  # This will call the clean() method
+        if not kwargs.get('update_fields'):
+            self.full_clean()
         super().save(*args, **kwargs)
     
     @property
@@ -267,13 +397,35 @@ class Image(TenantScopedModel):
     
     tags = models.ManyToManyField('Tag', through='ImageTag', related_name='images', blank=True)
 
+    # --- Embedding tracking (mirrors Detection) ---
+    embedding_generated = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text=_('Whether a vector embedding has been generated for this image'),
+    )
+    embedding_model_version = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        help_text=_('Name of the model version used to generate the embedding'),
+    )
+    vector_point_id = models.CharField(
+        max_length=100,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text=_('ID of the corresponding point in the vector store'),
+    )
+
     class Meta:
         db_table = 'images'
         indexes = [
             models.Index(fields=['tenant', 'captured_at']),
             models.Index(fields=['tenant', 'plant_site']),
+            models.Index(fields=['tenant', 'embedding_generated']),  # add this
             models.Index(fields=['video', 'frame_number']),
             models.Index(fields=['storage_backend', 'storage_key']),
+            models.Index(fields=['vector_point_id']),                # add this
             models.Index(fields=['created_at']),
         ]
         ordering = ['-captured_at']
@@ -316,7 +468,6 @@ class Image(TenantScopedModel):
         else:
             return ""
         
-    @property
     def get_detections(self):
         """Get all detections associated with this image."""
         return self.detections.all()   #type: ignore
@@ -336,7 +487,8 @@ class Image(TenantScopedModel):
         
     def save(self, *args, **kwargs):
         """Override save to include validation."""
-        self.full_clean()  # This will call the clean() method
+        if not kwargs.get('update_fields'):
+            self.full_clean()
         super().save(*args, **kwargs)
     
     @property
@@ -356,6 +508,19 @@ class Image(TenantScopedModel):
         """Get dimensions of the image."""
         return f"{self.width}x{self.height}"
     
+    @property
+    def has_embedding(self) -> bool:
+        return self.embedding_generated and self.vector_point_id is not None
+
+    @property
+    def embedding_info(self) -> Optional[dict]:
+        if self.has_embedding:
+            return {
+                'vector_point_id': self.vector_point_id,
+                'embedding_model_version': self.embedding_model_version,
+            }
+        return None
+
 
 
 class Detection(TenantScopedModel):
@@ -375,12 +540,6 @@ class Detection(TenantScopedModel):
     # Classification
     label = models.CharField(max_length=100, db_index=True)
     confidence = models.FloatField()
-    
-    # Cropped region (optional, for faster retrieval)
-    storage_key = models.CharField(
-        max_length=500,
-        help_text=_('Full path/key in storage (e.g., org-123/images/2025/img.jpg)')
-    )
     
     storage_backend = models.CharField(
         max_length=20,
@@ -458,7 +617,8 @@ class Detection(TenantScopedModel):
 
     def save(self, *args, **kwargs):
         """Override save to include validation."""
-        self.full_clean()  # This will call the clean() method
+        if not kwargs.get('update_fields'):
+            self.full_clean()
         super().save(*args, **kwargs)
 
     @property
@@ -623,16 +783,11 @@ class Tag(models.Model):
             'total': image_count + video_count + detection_count
         }
     
-    @property
-    def usage_examples(self, limit=5):
-        """Get example media items that use this tag."""
-        image_examples = self.images.all()[:limit]  # type: ignore
-        video_examples = self.videos.all()[:limit]  # type: ignore
-        detection_examples = self.detections.all()[:limit]  # type: ignore
+    def usage_examples(self, limit: int = 5):
         return {
-            'images': image_examples,
-            'videos': video_examples,
-            'detections': detection_examples
+            'images': self.images.all()[:limit],          # type: ignore
+            'videos': self.videos.all()[:limit],          # type: ignore
+            'detections': self.detections.all()[:limit],  # type: ignore
         }
     
     @property
