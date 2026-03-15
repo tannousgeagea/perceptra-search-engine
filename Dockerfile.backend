@@ -54,6 +54,11 @@ RUN pip3 install qdrant-client>=1.7.0
 
 RUN pip3 install opencv-python>=4.8.0
 
+# Install SAM3 dependencies
+RUN git clone https://github.com/facebookresearch/sam3.git /opt/sam3
+RUN pip3 install -e /opt/sam3
+RUN pip3 install -e /opt/sam3[notebooks]
+
 # upgrade everything
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -q -y \
    && rm -rf /var/lib/apt/lists/*
@@ -73,11 +78,13 @@ RUN mkdir -p /var/log/supervisor && \
 	
 COPY . /home/${user}/src
 COPY ./supervisord.conf /etc/supervisord.conf
+COPY ./pull_weights.sh /home/.
 COPY ./entrypoint.sh /home/.
 
 RUN /bin/bash -c "chown -R $user:$user /home/$user/"
 RUN /bin/bash -c "chown -R $user:$user /media/search-engine/"
 
 RUN /bin/bash -c "chown $user:$user /home/entrypoint.sh"
+RUN /bin/bash -c "chown $user:$user /home/pull_weights.sh && chmod +x /home/pull_weights.sh"
 
 ENTRYPOINT /bin/bash -c ". /home/entrypoint.sh"
