@@ -1,6 +1,7 @@
 # apps/media/models.py
 
 import hashlib
+from typing import Optional
 from django.db import models
 from tenants.models import Tenant
 from tenants.managers import TenantManager
@@ -245,7 +246,8 @@ class Video(TenantScopedModel):
 
 
     def __str__(self) -> str:
-        return f"Video {self.filename} ({self.duration_seconds:.2f}s)"
+        duration = f"{self.duration_seconds:.2f}s" if self.duration_seconds is not None else "unknown duration"
+        return f"Video {self.filename} ({duration})"
     
     def clean(self):
         """Custom validation to ensure data integrity."""
@@ -256,7 +258,8 @@ class Video(TenantScopedModel):
     
     def save(self, *args, **kwargs):
         """Override save to include validation."""
-        self.full_clean()  # This will call the clean() method
+        if not kwargs.get('update_fields'):
+            self.full_clean()
         super().save(*args, **kwargs)
     
     @property
@@ -394,13 +397,35 @@ class Image(TenantScopedModel):
     
     tags = models.ManyToManyField('Tag', through='ImageTag', related_name='images', blank=True)
 
+    # --- Embedding tracking (mirrors Detection) ---
+    embedding_generated = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text=_('Whether a vector embedding has been generated for this image'),
+    )
+    embedding_model_version = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        help_text=_('Name of the model version used to generate the embedding'),
+    )
+    vector_point_id = models.CharField(
+        max_length=100,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text=_('ID of the corresponding point in the vector store'),
+    )
+
     class Meta:
         db_table = 'images'
         indexes = [
             models.Index(fields=['tenant', 'captured_at']),
             models.Index(fields=['tenant', 'plant_site']),
+            models.Index(fields=['tenant', 'embedding_generated']),  # add this
             models.Index(fields=['video', 'frame_number']),
             models.Index(fields=['storage_backend', 'storage_key']),
+            models.Index(fields=['vector_point_id']),                # add this
             models.Index(fields=['created_at']),
         ]
         ordering = ['-captured_at']
@@ -443,7 +468,6 @@ class Image(TenantScopedModel):
         else:
             return ""
         
-    @property
     def get_detections(self):
         """Get all detections associated with this image."""
         return self.detections.all()   #type: ignore
@@ -463,7 +487,8 @@ class Image(TenantScopedModel):
         
     def save(self, *args, **kwargs):
         """Override save to include validation."""
-        self.full_clean()  # This will call the clean() method
+        if not kwargs.get('update_fields'):
+            self.full_clean()
         super().save(*args, **kwargs)
     
     @property
@@ -483,6 +508,19 @@ class Image(TenantScopedModel):
         """Get dimensions of the image."""
         return f"{self.width}x{self.height}"
     
+    @property
+    def has_embedding(self) -> bool:
+        return self.embedding_generated and self.vector_point_id is not None
+
+    @property
+    def embedding_info(self) -> Optional[dict]:
+        if self.has_embedding:
+            return {
+                'vector_point_id': self.vector_point_id,
+                'embedding_model_version': self.embedding_model_version,
+            }
+        return None
+
 
 
 class Detection(TenantScopedModel):
@@ -502,12 +540,6 @@ class Detection(TenantScopedModel):
     # Classification
     label = models.CharField(max_length=100, db_index=True)
     confidence = models.FloatField()
-    
-    # Cropped region (optional, for faster retrieval)
-    storage_key = models.CharField(
-        max_length=500,
-        help_text=_('Full path/key in storage (e.g., org-123/images/2025/img.jpg)')
-    )
     
     storage_backend = models.CharField(
         max_length=20,
@@ -585,7 +617,8 @@ class Detection(TenantScopedModel):
 
     def save(self, *args, **kwargs):
         """Override save to include validation."""
-        self.full_clean()  # This will call the clean() method
+        if not kwargs.get('update_fields'):
+            self.full_clean()
         super().save(*args, **kwargs)
 
     @property
@@ -750,16 +783,11 @@ class Tag(models.Model):
             'total': image_count + video_count + detection_count
         }
     
-    @property
-    def usage_examples(self, limit=5):
-        """Get example media items that use this tag."""
-        image_examples = self.images.all()[:limit]  # type: ignore
-        video_examples = self.videos.all()[:limit]  # type: ignore
-        detection_examples = self.detections.all()[:limit]  # type: ignore
+    def usage_examples(self, limit: int = 5):
         return {
-            'images': image_examples,
-            'videos': video_examples,
-            'detections': detection_examples
+            'images': self.images.all()[:limit],          # type: ignore
+            'videos': self.videos.all()[:limit],          # type: ignore
+            'detections': self.detections.all()[:limit],  # type: ignore
         }
     
     @property

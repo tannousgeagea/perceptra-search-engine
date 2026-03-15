@@ -123,7 +123,16 @@ async def process_image_task(image_id: int):
         
         # Update image status (mark as embedded)
         image.status = StatusChoices.COMPLETED
-        image.save(update_fields=['status', 'updated_at'])
+        image.embedding_generated = True
+        image.vector_point_id = vector_point_id
+        image.embedding_model_version = model_version.name
+        image.save(update_fields=[
+            'status',
+            'embedding_generated',
+            'vector_point_id',
+            'embedding_model_version',
+            'updated_at',
+        ])
         
         logger.info(f"Image {image_id} embedding completed: {vector_point_id}")
         
