@@ -6,6 +6,17 @@ from .base import BaseEmbeddingModel
 from .clip import CLIPEmbedding, CLIP_AVAILABLE
 from .perception import PerceptionEncoder, PERCEPTION_AVAILABLE
 
+try:
+    from .dinov2 import DINOv2Embedding
+    DINOV2_AVAILABLE = True
+except ImportError:
+    DINOV2_AVAILABLE = False
+
+try:
+    from .sam3_encoder import SAM3Embedding, SAM3_AVAILABLE
+except ImportError:
+    SAM3_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,6 +29,7 @@ class EmbeddingGenerator:
     _instance = None
     _current_model: Optional[BaseEmbeddingModel] = None
     _current_model_name: Optional[str] = None
+    _attention_pooler = None  # Lazy-loaded auxiliary model for saliency
     
     def __new__(cls):
         if cls._instance is None:
@@ -38,8 +50,14 @@ class EmbeddingGenerator:
         if PERCEPTION_AVAILABLE:
             models['perception'] = PerceptionEncoder
             logger.info("Perception Encoder models available")
-        
-        # Add more models here as they become available
+
+        if DINOV2_AVAILABLE:
+            models['dinov2'] = DINOv2Embedding
+            logger.info("DINOv2 models available")
+
+        if SAM3_AVAILABLE:
+            models['sam3'] = SAM3Embedding
+            logger.info("SAM3 models available")
         
         if not models:
             logger.warning("No embedding models available!")
@@ -49,7 +67,7 @@ class EmbeddingGenerator:
     def get_model(
         self,
         model_type: str,
-        model_variant: Optional[str] = None,
+        model_name: Optional[str] = None,
         device: Optional[str] = None,
         force_reload: bool = False,
         **kwargs
@@ -67,7 +85,7 @@ class EmbeddingGenerator:
         Returns:
             Embedding model instance
         """
-        model_key = f"{model_type}_{model_variant or 'default'}_{device or 'auto'}"
+        model_key = f"{model_type}_{model_name or 'default'}_{device or 'auto'}"
         
         # Return cached model if same configuration and not forcing reload
         if (not force_reload and 
@@ -92,15 +110,18 @@ class EmbeddingGenerator:
         # Create new model
         model_class = self._available_models[model_type]
         
-        if model_type == 'clip':
+        # Model-specific defaults
+        defaults = {
+            'clip': 'ViT-B-32',
+            'perception': 'PE-Core-B-16',
+            'dinov2': 'vits14',
+            'sam3': 'SAM3',
+        }
+        default_name = defaults.get(model_type)
+
+        if default_name or model_name:
             model = model_class(
-                model_variant=model_variant or 'ViT-B-32',
-                device=device,
-                **kwargs
-            )
-        elif model_type == 'perception':
-            model = model_class(
-                model_name=model_variant or 'PE-Core-B-16',
+                model_name=model_name or default_name,
                 device=device,
                 **kwargs
             )
@@ -118,13 +139,27 @@ class EmbeddingGenerator:
         
         return model
     
+    def get_attention_pooler(self, device: Optional[str] = None):
+        """Get the shared attention pooler (lazy-loaded DINOv2-small).
+
+        The pooler coexists with the primary model — it is lightweight
+        (~22M params) and runs a single forward pass for saliency.
+        """
+        if self._attention_pooler is None:
+            from infrastructure.embeddings.attention_pooling import AttentionPooler
+            self._attention_pooler = AttentionPooler(device=device)
+        return self._attention_pooler
+
     def clear_cache(self):
         """Clear cached model."""
         if self._current_model is not None:
             self._current_model.unload()
             self._current_model = None
             self._current_model_name = None
-            logger.info("Model cache cleared")
+        if self._attention_pooler is not None:
+            self._attention_pooler.unload()
+            self._attention_pooler = None
+        logger.info("Model cache cleared")
     
     def list_available_models(self) -> Dict[str, Any]:
         """List all available models and their variants."""
@@ -143,7 +178,21 @@ class EmbeddingGenerator:
                 'variants': list(PerceptionEncoder.AVAILABLE_MODELS.keys()),
                 'supports_text': 'conditional'
             }
-        
+
+        if DINOV2_AVAILABLE:
+            available['dinov2'] = {
+                'class': 'DINOv2Embedding',
+                'variants': list(DINOv2Embedding.AVAILABLE_MODELS.keys()),
+                'supports_text': False
+            }
+
+        if SAM3_AVAILABLE:
+            available['sam3'] = {
+                'class': 'SAM3Embedding',
+                'variants': list(SAM3Embedding.AVAILABLE_MODELS.keys()),
+                'supports_text': False
+            }
+
         return available
 
 

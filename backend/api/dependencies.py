@@ -62,8 +62,7 @@ async def get_request_context(
     """
 
     if x_api_key:
-        context = await authenticate_with_api_key(request, x_api_key)
-        return context
+        return await authenticate_with_api_key(request, x_api_key)
 
     # Try JWT authentication
     if authorization:
@@ -73,11 +72,14 @@ async def get_request_context(
         membership = await get_tenant_membership(user, tenant)
         
         # Create context
-        context = RequestContext(user, tenant, membership)
-        context.auth_method = 'jwt'
-        
-        return context
-    
+        return RequestContext(
+            user=user, 
+            tenant=tenant, 
+            membership=membership,
+            role=membership.role,
+            auth_method='jwt'
+        )
+            
     # No authentication provided
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

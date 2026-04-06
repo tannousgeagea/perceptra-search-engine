@@ -1,4 +1,4 @@
-# api/auth/api_key.py
+# api_keys/auth.py
 
 from typing import Optional, Tuple
 from fastapi import HTTPException, status, Header, Request
@@ -66,8 +66,10 @@ class APIKeyAuth:
         
         # Query database
         try:
-            api_key_obj = await APIKey.objects.select_related('tenant').aget(
-                key_prefix=key_prefix
+            api_key_obj = await (
+                APIKey.objects
+                .select_related('tenant', 'created_by', 'owned_by')
+                .aget(key_prefix=key_prefix)
             )
         except APIKey.DoesNotExist:
             raise HTTPException(
@@ -98,44 +100,33 @@ class APIKeyAuth:
     
     @staticmethod
     def check_rate_limit(api_key: APIKey, cache_prefix: str = "rate_limit") -> bool:
-        """
-        Check if API key has exceeded rate limits.
-        
-        Args:
-            api_key: APIKey instance
-            cache_prefix: Cache key prefix
-            
-        Returns:
-            True if within limits, raises HTTPException if exceeded
-        """
         now = timezone.now()
-        
-        # Per-minute check
+
         minute_key = f"{cache_prefix}:minute:{api_key.api_key_id}:{now.strftime('%Y%m%d%H%M')}"
-        minute_count = cache.get(minute_key, 0)
-        
-        if minute_count >= api_key.rate_limit_per_minute:
+        hour_key   = f"{cache_prefix}:hour:{api_key.api_key_id}:{now.strftime('%Y%m%d%H')}"
+
+        # cache.add sets the key only if it doesn't exist (atomic).
+        # cache.incr is atomic on Redis/Memcached — no read-modify-write race.
+        cache.add(minute_key, 0, 60)
+        minute_count = cache.incr(minute_key)
+
+        if minute_count > api_key.rate_limit_per_minute:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Rate limit exceeded: {api_key.rate_limit_per_minute} requests per minute",
-                headers={"Retry-After": "60"}
+                detail=f"Rate limit exceeded: {api_key.rate_limit_per_minute} requests/min",
+                headers={"Retry-After": "60"},
             )
-        
-        # Per-hour check
-        hour_key = f"{cache_prefix}:hour:{api_key.api_key_id}:{now.strftime('%Y%m%d%H')}"
-        hour_count = cache.get(hour_key, 0)
-        
-        if hour_count >= api_key.rate_limit_per_hour:
+
+        cache.add(hour_key, 0, 3600)
+        hour_count = cache.incr(hour_key)
+
+        if hour_count > api_key.rate_limit_per_hour:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Rate limit exceeded: {api_key.rate_limit_per_hour} requests per hour",
-                headers={"Retry-After": "3600"}
+                detail=f"Rate limit exceeded: {api_key.rate_limit_per_hour} requests/hr",
+                headers={"Retry-After": "3600"},
             )
-        
-        # Increment counters
-        cache.set(minute_key, minute_count + 1, 60)
-        cache.set(hour_key, hour_count + 1, 3600)
-        
+
         return True
     
     @staticmethod
@@ -209,6 +200,62 @@ async def get_api_key_from_header(
     return x_api_key
 
 
+# =============================================================================
+# api/auth/api_key.py
+#
+# Role resolution is done here, fully async, before RequestContext is built.
+# One async function owns the full resolution chain:
+#   verify_api_key → load owned_by membership → derive effective role → build ctx
+# =============================================================================
+
+async def _resolve_api_key_role(api_key, tenant) -> str:
+    """
+    Derive the effective role for an API key request.
+
+    Rules:
+      1. If the key has no owned_by, it acts as its creator — map the key's
+         declared permission to a role directly.
+      2. If the key has an owned_by, fetch that user's membership and take
+         the lower of (key permission, membership role). This ensures an admin
+         cannot create a key that exceeds the target user's actual privileges.
+      3. If owned_by has lost their membership, drop to 'viewer' and log —
+         the key is still valid but maximally restricted until reviewed.
+    """
+    from tenants.models import TenantMembership
+
+    _permission_to_rank = {'read': 1, 'write': 2, 'admin': 3}
+    _rank_to_role       = {1: 'viewer', 2: 'operator', 3: 'admin'}
+    _role_to_rank       = {'viewer': 1, 'operator': 2, 'admin': 3}
+    _permission_to_role = {'read': 'viewer', 'write': 'operator', 'admin': 'admin'}
+
+    if api_key.owned_by is None:
+        # No delegation — key acts as its creator at the declared permission level
+        return _permission_to_role.get(api_key.permissions, 'viewer')
+
+    # owned_by is already loaded (select_related in verify_api_key)
+    # but the membership is not — fetch it now, properly async
+    try:
+        membership = await TenantMembership.objects.aget(
+            user=api_key.owned_by,
+            tenant=tenant,
+            is_active=True,
+        )
+    except TenantMembership.DoesNotExist:
+        # owned_by user lost their membership after the key was created
+        logger.warning(
+            f"API key {api_key.key_prefix}: owned_by user "
+            f"{api_key.owned_by_id} has no active membership in "
+            f"tenant {tenant.slug}. Restricting to viewer."
+        )
+        return 'viewer'
+
+    key_rank    = _permission_to_rank.get(api_key.permissions, 1)
+    member_rank = _role_to_rank.get(membership.role, 1)
+    effective   = min(key_rank, member_rank)   # lower of the two wins
+
+    return _rank_to_role[effective]
+
+
 async def authenticate_with_api_key(
     request: Request,
     x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None
@@ -241,16 +288,18 @@ async def authenticate_with_api_key(
     from asgiref.sync import sync_to_async
     await sync_to_async(api_key.record_usage)(client_ip)
     
+    # Resolve role fully async before touching RequestContext
+    role = await _resolve_api_key_role(api_key, tenant)
+
     # Create request context
     # Note: No user for API key auth, just tenant
     context = RequestContext(
         user=None,  # No user for API key
         tenant=tenant,
-        membership=None  # type: ignore
+        membership=None,  # type: ignore
+        api_key=api_key,
+        role=role,
+        auth_method='api_key'
     )
-    
-    # Attach API key info to context
-    context.api_key = api_key   # type: ignore
-    context.auth_method = 'api_key'  # type: ignore
     
     return context

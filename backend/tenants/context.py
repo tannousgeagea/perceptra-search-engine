@@ -15,18 +15,39 @@ class RequestContext:
         self,
         user: User,    #type: ignore
         tenant: Tenant,
-        membership: TenantMembership,
+        membership: Optional[TenantMembership],
+        role: str,
         api_key: Optional[Any] = None,
         auth_method:Optional[str] = 'jwt'
     ):
         self.user = user
         self.tenant = tenant
         self.membership = membership
-        if self.membership:
-            self.role = membership.role
         self.api_key = api_key
         self.auth_method = auth_method
-    
+        self.role = role
+
+    @property
+    def effective_user(self):
+        """
+        Always returns a user instance safe to assign to created_by / updated_by.
+
+        Resolution order:
+          1. JWT-authenticated user (ctx.user)
+          2. The user who created the API key (api_key.created_by)
+          3. None — field is nullable, record is still created
+        """
+        if self.user is not None:
+            return self.user
+        if self.api_key is not None:
+            return self.api_key.owned_by or self.api_key.created_by
+        return None
+
+    @property
+    def effective_api_key(self):
+        return self.api_key if self.auth_method == 'api_key' else None
+
+
     def has_role(self, *role_names: str) -> bool:
         """Check if user has any of the specified roles."""
         return self.role in role_names
@@ -57,9 +78,10 @@ class RequestContext:
         return str(self.tenant.id)   # type: ignore
     
     @property
-    def user_id(self) -> str:
-        """Get user ID as string."""
-        return str(self.user.id)
-    
+    def user_id(self) -> Optional[str]:
+        u = self.effective_user
+        return str(u.id) if u else None
+
     def __repr__(self):
-        return f"RequestContext(user={self.user.email}, tenant={self.tenant.slug}, role={self.role})"
+        user_label = self.effective_user.email if self.effective_user else 'anonymous'
+        return f"RequestContext(user={user_label}, tenant={self.tenant.slug}, role={self.role})"

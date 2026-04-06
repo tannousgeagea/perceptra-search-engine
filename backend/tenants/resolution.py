@@ -52,7 +52,7 @@ async def resolve_tenant(
 async def _get_tenant_by_id(tenant_id: str) -> Tenant:
     """Get tenant by UUID"""
     try:
-        tenant = await Tenant.objects.aget(id=tenant_id, is_active=True)
+        tenant = await Tenant.objects.aget(tenant_id=tenant_id, is_active=True)
         return tenant
     except Tenant.DoesNotExist:
         raise HTTPException(
@@ -67,7 +67,14 @@ async def _get_tenant_by_id(tenant_id: str) -> Tenant:
 
 
 async def _get_tenant_by_domain(domain: str) -> Tenant:
-    """Get tenant by slug/domain"""
+    """Get tenant by domain or slug."""
+    # Try domain field first, then fall back to slug
+    try:
+        tenant = await Tenant.objects.aget(domain=domain, is_active=True)
+        return tenant
+    except Tenant.DoesNotExist:
+        pass
+
     try:
         tenant = await Tenant.objects.aget(slug=domain, is_active=True)
         return tenant

@@ -38,13 +38,24 @@ class BaseConfig:
     CELERY_TASK_QUEUES = (
         Queue("celery"),           # Default queue
         Queue("cleanup"),          # Cleanup tasks
-        Queue("embedding"),         # Embedding generation tasks
+        Queue("embedding"),        # Embedding generation tasks
+        Queue("detection"),        # Auto-detection tasks (SAM3/perceptra-seg)
         Queue("maintenance"),      # Maintenance tasks
+        Queue("alerts"),           # Alert checking tasks
     )
     
     # Performance
     CELERY_WORKER_PREFETCH_MULTIPLIER = 1
-    CELERY_WORKER_MAX_TASKS_PER_CHILD = 1000
+    CELERY_WORKER_MAX_TASKS_PER_CHILD = 200
+
+    # Celery Beat schedule
+    beat_schedule = {
+        'validate-embeddings-hourly': {
+            'task': 'maintenance:validate_embeddings',
+            'schedule': crontab(minute=0),  # every hour at :00
+            'kwargs': {'sample_size': 100},
+        },
+    }
     
     # Task results
     result_expires = 3600  # 1 hour

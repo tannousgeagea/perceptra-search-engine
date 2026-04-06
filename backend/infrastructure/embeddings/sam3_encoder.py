@@ -1,14 +1,12 @@
 import logging
 import os
-from os import getenv as env
 import time
 from typing import Union, List, Optional
-import subprocess
 
 import numpy as np
 from PIL import Image
 
-from base import (
+from infrastructure.embeddings.base import (
     BaseEmbeddingModel,
     ModelLoadError,
     EncodingError,
@@ -39,7 +37,7 @@ class SAM3Embedding(BaseEmbeddingModel):
     """Embedding backend using SAM3 model."""
     def __init__(
         self, 
-        model_variant: str = 'SAM3',
+        model_name: str = 'SAM3',
         device: Optional[str] = None,    
         pretrained: Optional[str] = None,
         **kwargs
@@ -52,74 +50,35 @@ class SAM3Embedding(BaseEmbeddingModel):
                 "pip install -e /opt/sam3\n"
                 "pip install -e /opt/sam3[notebooks]"
             )
-        if model_variant not in self.AVAILABLE_MODELS:
+        if model_name not in self.AVAILABLE_MODELS:
             raise ValueError(
-                f"Invalid SAM3 variant: {model_variant}. "
+                f"Invalid SAM3 variant: {model_name}. "
                 f"Available: {list(self.AVAILABLE_MODELS.keys())}"
             )
 
-        sam3_dir = "/opt/checkpoints/sam3"
-        weight_file = os.path.join(sam3_dir, "sam3.pt")
-        config_file = os.path.join(sam3_dir, "config.json")
-         # Skip download if files exist
-        if os.path.exists(weight_file) and os.path.exists(config_file):
-            logging.info("SAM3 weights already exist. Skipping download.")
-        else:
-            self._download_weights(sam3_dir)
-
-        self.model_variant = model_variant
-        self.model_config = self.AVAILABLE_MODELS[model_variant]
+        self.model_name = model_name
+        self.model_config = self.AVAILABLE_MODELS[model_name]
         self._embedding_dim = self.model_config['embedding_dim']
         self.pretrained = pretrained or self.model_config['pretrained']
         
         super().__init__(
-            model_name=f"sam3-{model_variant.replace('/', '-').lower()}",
+            model_name=f"sam3-{model_name.replace('/', '-').lower()}",
             device=device,
             **kwargs
         )
 
-    def _download_weights(self, sam3_dir):
-        weight_file = os.path.join(sam3_dir, "sam3.pt")
-        config_file = os.path.join(sam3_dir, "config.json")
-
-        os.makedirs(sam3_dir)
-
-        # Skip download if files exist
-        if os.path.exists(weight_file) and os.path.exists(config_file):
-            logging.info("SAM3 weights already exist. Skipping download.")
-            return
-
-        hf_token = env("HF_TOKEN", None)
-        if hf_token is None:
-            raise ValueError("HF_TOKEN should be set in environmental variables")
-
-        logging.info("Downloading SAM3 weights...")
-
-        subprocess.run(
-            [
-                "hf",
-                "download",
-                "--token",
-                hf_token,
-                "facebook/sam3",
-                "sam3.pt",
-                "config.json",
-                "--local-dir",
-                sam3_dir,
-            ],
-            check=True,
-        )
-
-        logging.info("SAM3 weights downloaded.")
     
     def load(self):
         start_time = time.time()
         try:    
+            sam3_dir = "/opt/checkpoints/huggingface/facebook/sam3"
+            if not os.path.exists(sam3_dir):
+                raise ValueError(f"Weights for model {self.model_name} at path {sam3_dir} doesn't exist")
             self.model = build_sam3_image_model(
                 bpe_path=None, 
                 device=self.device_str,
                 enable_inst_interactivity=False,
-                checkpoint_path="/opt/checkpoints/sam3/sam3.pt",
+                checkpoint_path="/opt/checkpoints/huggingface/facebook/sam3/sam3.pt",
                 load_from_HF=False,
             )
             self.model.eval()
@@ -141,7 +100,7 @@ class SAM3Embedding(BaseEmbeddingModel):
             self._is_loaded = True
             
             logger.info(
-                f"SAM3 model with Image Encoder PE loaded successfully: {self.model_variant} "
+                f"SAM3 model with Image Encoder PE loaded successfully: {self.model_name} "
                 f"({self._embedding_dim}-d embeddings)"
             )
             loading_time = (time.time() - start_time) * 1000
@@ -206,27 +165,40 @@ class SAM3Embedding(BaseEmbeddingModel):
             return image_features
         
         except Exception as e:
-            logger.error(f"Encountered error while encoding image: str{e}")
-            raise EncodingError(f"Encountered error while encoding image: str{e}")
+            logger.error(f"Encountered error while encoding image: {e}")
+            raise EncodingError(f"Encountered error while encoding image: {e}")
 
-    def encode_images_batch(self, images: List[Union[bytes, Image.Image, np.ndarray]]) -> np.ndarray:
-        image_features = self._encode_images(images)
+    MAX_BATCH_SIZE = 8
 
-        start_time = time.time()
-        image_features = image_features.mean(dim=(-2, -1)) # Global average pooling over spatial dimensions
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True) + 1e-10 # Normalize to unit length
-        embeddings = self._to_numpy(image_features)
+    def _encode_images_chunk(self, chunk: list) -> list:
+        """Encode a single chunk of images."""
+        image_features = self._encode_images(chunk)
+        image_features = image_features.mean(dim=(-2, -1))
+        image_features = image_features / (image_features.norm(dim=-1, keepdim=True) + 1e-10)
+        return list(self._to_numpy(image_features))
 
-        processing_time = (time.time() - start_time) * 1000
-        logger.debug(f"Postprocessing of batched image features took: {processing_time:.2f}ms")
-        return list(embeddings)
+    def encode_images_batch(self, images: List[Union[bytes, Image.Image, np.ndarray]]) -> list:
+        if not self._is_loaded:
+            self.load()
+
+        if len(images) <= self.MAX_BATCH_SIZE:
+            return self._encode_images_chunk(images)
+
+        results: list = []
+        for i in range(0, len(images), self.MAX_BATCH_SIZE):
+            chunk = images[i:i + self.MAX_BATCH_SIZE]
+            results.extend(self._encode_images_chunk(chunk))
+        return results
     
     def encode_image(self, image):
+        if not self._is_loaded:
+            self.load()
+
         image_features = self._encode_images(images=[image])
 
         start_time = time.time()
         image_features = image_features.mean(dim=(-2, -1)) # Global average pooling over spatial dimensions
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True) + 1e-10 # Normalize to unit length
+        image_features = image_features / (image_features.norm(dim=-1, keepdim=True) + 1e-10)  # Normalize to unit length
         embeddings = self._to_numpy(image_features[0]) # Get the single image embedding
         
         processing_time = (time.time() - start_time) * 1000
@@ -239,6 +211,9 @@ class SAM3Embedding(BaseEmbeddingModel):
         boxes: List[tuple],
         roi_output_size: tuple = (7, 7)
     ) -> np.ndarray:
+        if not self._is_loaded:
+            self.load()
+
         preprocessed_box_batch =  [self._preprocess_boxes(boxes)]
         image_features = self._encode_images([image])
         start_time = time.time()
@@ -254,7 +229,7 @@ class SAM3Embedding(BaseEmbeddingModel):
         )
 
         roi_embeddings = roi_embeddings.mean(dim=[-2, -1])  # Average pool to get [N, Embedding_dim]
-        roi_embeddings = roi_embeddings / roi_embeddings.norm(dim=-1, keepdim=True) + 1e-10 # Normalize to unit length
+        roi_embeddings = roi_embeddings / (roi_embeddings.norm(dim=-1, keepdim=True) + 1e-10)  # Normalize to unit length
         roi_embeddings = self._to_numpy(roi_embeddings)
 
         processing_time = (time.time() - start_time) * 1000
@@ -268,6 +243,9 @@ class SAM3Embedding(BaseEmbeddingModel):
         box_batch: List[tuple],
         roi_output_size: tuple = (7, 7)
     ):
+        if not self._is_loaded:
+            self.load()
+
         preprocessed_box_batch = [self._preprocess_boxes(boxes) for boxes in box_batch]
         image_features = self._encode_images(images)
 
@@ -284,7 +262,7 @@ class SAM3Embedding(BaseEmbeddingModel):
         )
 
         roi_embeddings = roi_embeddings.mean(dim=[-2, -1])  # Average pool to get [N, Embedding_dim]
-        roi_embeddings = roi_embeddings / roi_embeddings.norm(dim=-1, keepdim=True) + 1e-10 # Normalize to unit length
+        roi_embeddings = roi_embeddings / (roi_embeddings.norm(dim=-1, keepdim=True) + 1e-10)  # Normalize to unit length
         roi_embeddings = self._to_numpy(roi_embeddings)
 
         batched_roi_embeddings = []
@@ -295,6 +273,72 @@ class SAM3Embedding(BaseEmbeddingModel):
         logger.debug(f"Postprocessing of image roi features took: {processing_time:.2f}ms")
         return batched_roi_embeddings
     
+    def encode_detection_with_context(
+        self,
+        image: Union[bytes, Image.Image, np.ndarray],
+        bbox: tuple,
+        halo_ratio: float = 0.5,
+        roi_weight: float = 0.7,
+    ) -> list:
+        """Encode a detection region with surrounding structural context.
+
+        Instead of cropping the bounding box and encoding it in isolation,
+        this method extracts two ROI embeddings from the full image's feature
+        map via ``roi_align``:
+
+        1. The **tight ROI** — the detection bounding box itself.
+        2. The **context halo** — the bbox expanded by ``halo_ratio`` in each
+           direction, clamped to image bounds.
+
+        The final embedding is the weighted blend of both, capturing what the
+        defect looks like *and* where it sits structurally.
+
+        Args:
+            image: Full parent image (bytes, PIL, or ndarray).
+            bbox: Normalized ``(x, y, width, height)`` with values in ``[0, 1]``.
+            halo_ratio: How much to expand the bbox for context (0.5 = 50%).
+            roi_weight: Weight of the tight ROI vs. halo (default 0.7).
+
+        Returns:
+            L2-normalised embedding as a Python list of floats.
+        """
+        if not self._is_loaded:
+            self.load()
+
+        x, y, w, h = bbox
+
+        # Tight ROI in [x_min, y_min, x_max, y_max] normalised format
+        x_min = max(0.0, x)
+        y_min = max(0.0, y)
+        x_max = min(1.0, x + w)
+        y_max = min(1.0, y + h)
+        tight_box = (x_min, y_min, x_max, y_max)
+
+        # Context halo — expand by halo_ratio in each direction
+        expand_w = w * halo_ratio
+        expand_h = h * halo_ratio
+        halo_box = (
+            max(0.0, x_min - expand_w),
+            max(0.0, y_min - expand_h),
+            min(1.0, x_max + expand_w),
+            min(1.0, y_max + expand_h),
+        )
+
+        # Single forward pass — both ROIs extracted from the same feature map
+        roi_embeddings = self.encode_image_with_rois(image, [tight_box, halo_box])
+
+        # Weighted fusion
+        tight_emb = np.array(roi_embeddings[0], dtype=np.float32)
+        halo_emb = np.array(roi_embeddings[1], dtype=np.float32)
+        fused = roi_weight * tight_emb + (1.0 - roi_weight) * halo_emb
+
+        # L2-normalise
+        norm = np.linalg.norm(fused)
+        if norm > 0:
+            fused = fused / norm
+
+        return list(fused)
+
     def encode_text(self, text: str) -> np.ndarray:
         """SAM3 does not support text encoding."""
         raise NotImplementedError("This embedding backend is using the PE Encois a vision-only model and does not support text encoding")
@@ -320,10 +364,9 @@ class SAM3Embedding(BaseEmbeddingModel):
 if __name__ == "__main__":
     # Example usage
     encoder = SAM3Embedding(
-        model_variant='SAM3',
+        model_name='SAM3',
         device="cuda",    
     )
-    encoder.load()
     image = Image.fromarray(np.zeros((1008, 1008, 3), dtype=np.uint8)).convert("RGB")
 
     embedding = encoder.encode_image(image)

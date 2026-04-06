@@ -38,6 +38,9 @@ Usage:
 from .video import process_video_task
 from .image import process_image_task
 from .detection import process_detection_task
+from .auto_detection import auto_detect_image_task
+from .validation import validate_embeddings_task
+from .delta import compute_delta_embedding_task
 from .batch import (
     batch_process_images_task,
     batch_process_detections_task,
@@ -48,7 +51,10 @@ __all__ = [
     'process_video_task',
     'process_image_task',
     'process_detection_task',
+    'auto_detect_image_task',
+    'validate_embeddings_task',
+    'compute_delta_embedding_task',
     'batch_process_images_task',
     'batch_process_detections_task',
-    'reembed_with_new_model_task'
+    'reembed_with_new_model_task',
 ]

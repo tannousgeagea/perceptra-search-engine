@@ -1,7 +1,7 @@
 
 
 services:
-  search-engine:
+  optivyn:
     build:
       context: .
       dockerfile: Dockerfile.backend
@@ -10,15 +10,25 @@ services:
         userid: ${userid}
         group: ${group}
         groupid: ${groupid}
-    image: tannousgeagea/search-engine:latest
-    container_name: search-engine-core
+    image: tannousgeagea/optivyn:latest
+    container_name: optivyn-core
     env_file: .env
     stdin_open: true # docker run -i
     tty: true        # docker run -t
+    restart: always
     ports:
       - 8000:8000
       - 8001:8001
       - 9001:9001
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - AGENT_ENABLED=${AGENT_ENABLED:-true}
+      - AGENT_MAX_TURNS=${AGENT_MAX_TURNS:-3}
+      - AGENT_TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-10}
     volumes:
       - .:/home/appuser/src
       - ${MEDIA_ROOT}:/media
@@ -33,12 +43,30 @@ services:
     #           capabilities: [gpu]
     depends_on:
       - db
+      - redis
+      - qdrant
     working_dir: /home/appuser/src
+
+  model-puller:
+    image: tannousgeagea/search-engine:latest
+    container_name: search-engine-model-puller
+    env_file: .env  
+    volumes:
+      - .:/home/appuser/src
+      - model-weights:/opt/checkpoints/
+    environment:
+      - PREFETCH_MODELS=${PREFETCH_MODELS:-clip:vit_b_32, dinov2:vitb14, pe_core:b_16, sam3:base}
+      - MAX_CONCURRENCY_DOWNLOADS=3
+   
+    entrypoint: ["python3", "/home/appuser/src/scripts/model_weights/pull_weights.py"]
+    profiles:
+      - setup
 
   db:
     image: postgres:latest
-    container_name: search-engine-db
+    container_name: optivyn-db
     env_file: .env
+    restart: always
     environment:
       POSTGRES_USER: ${DATABASE_USER}
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
@@ -53,6 +81,7 @@ services:
     ports:
       - 6333:6333
       - 6334:6334
+      - 6335:6335
     expose:
       - 6333
       - 6334
@@ -65,9 +94,32 @@ services:
     volumes:
       - ./qdrant_data:/qdrant/storage
 
+  redis:
+    image: "redis:alpine"
+    container_name: optivyn-redis
+    restart: "always"
+    volumes:
+      - cache:/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    volumes:
+      - ./frontend:/app
+    image: tannousgeagea/optivyn-ui:latest
+    container_name: optivyn-ui
+    restart: always
+    ports:
+      - "3000:3000"
+    depends_on:
+      - optivyn
+
 volumes:
   postgres_data:
   model-weights:
+  cache:
+    driver: local
 
 configs:
   qdrant_config:

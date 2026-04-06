@@ -12,8 +12,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-@shared_task(base=EmbeddingTask, name='embeddings.process_video')
-async def process_video_task(video_id: int, fps:float=1.0, max_frames:Optional[int]=None):
+@shared_task(base=EmbeddingTask, name='embedding:process_video', queue='embedding')
+def process_video_task(video_id: int, fps:float=1.0, max_frames:Optional[int]=None):
     """
     Process video: extract frames and trigger image embedding tasks.
     
@@ -26,7 +26,6 @@ async def process_video_task(video_id: int, fps:float=1.0, max_frames:Optional[i
     try:
         # Get video
         video = Video.objects.select_related('tenant').get(id=video_id)
-        
         logger.info(f"Processing video {video_id}: {video.filename}")
         
         # Update status
@@ -38,12 +37,13 @@ async def process_video_task(video_id: int, fps:float=1.0, max_frames:Optional[i
         
         # Download video from storage
         logger.info(f"Downloading video from storage: {video.storage_key}")
-        video_bytes = await storage.download(video.storage_key)
+        video_bytes = storage.download_sync(video.storage_key)
         
         # Get video info and update video record
         video_info = VideoProcessor.get_video_info(video_bytes)
-        video.duration_seconds = video_info['duration_seconds']
-        video.save(update_fields=['duration_seconds', 'updated_at'])
+        Video.objects.filter(pk=video.pk).update(
+            duration_seconds=video_info['duration_seconds']
+        )
 
         logger.info(
             f"Video info: {video_info['total_frames']} frames, "
@@ -63,6 +63,7 @@ async def process_video_task(video_id: int, fps:float=1.0, max_frames:Optional[i
 
         # Placeholder: Simulate frame extraction
         frames_created = 0
+        frame_objects = []
         for frame in frames:
             try:
                 # Generate storage key for frame
@@ -75,7 +76,7 @@ async def process_video_task(video_id: int, fps:float=1.0, max_frames:Optional[i
                 frame_bytes = frame.to_bytes(format='JPEG', quality=95)
                 
                 # Upload frame to storage
-                await storage.save(
+                storage.save_sync(
                     storage_key=storage_key,
                     content=frame_bytes,
                     content_type='image/jpeg',
@@ -86,7 +87,7 @@ async def process_video_task(video_id: int, fps:float=1.0, max_frames:Optional[i
                     }
                 )
                 # Create Image record
-                image = await Image.objects.acreate(
+                frame_objects.append(Image(
                     tenant=video.tenant,
                     video=video,
                     filename=frame_filename,
@@ -103,23 +104,29 @@ async def process_video_task(video_id: int, fps:float=1.0, max_frames:Optional[i
                     captured_at=video.recorded_at,
                     status=StatusChoices.UPLOADED,
                     created_by=video.created_by,
-                    updated_by=video.updated_by
-                )
-                
-                # Trigger image embedding task
-                process_image_task.delay(image.id)   #type: ignore
+                    updated_by=video.updated_by,
+                    created_by_api_key=video.created_by_api_key,
+                ))
                 
                 frames_created += 1
-                
                 logger.debug(f"Frame {frame.frame_number} saved and queued for embedding")
                 
             except Exception as e:
                 logger.error(f"Failed to process frame {frame.frame_number}: {str(e)}")
                 continue
 
-        # Update video status
-        video.status = StatusChoices.COMPLETED
-        video.save(update_fields=['status', 'updated_at'])
+        # Bulk insert all frame Image records in one query
+        created_images = Image.objects.bulk_create(frame_objects)
+        logger.info(f"Bulk created {len(created_images)} frame Image records")
+
+        # Dispatch embedding task per frame
+        for img in created_images:
+            process_image_task.delay(img.id)  # type: ignore
+
+        Video.objects.filter(pk=video.pk).update(
+            frame_count=len(created_images),
+            status=StatusChoices.COMPLETED,
+        )
         
         logger.info(
             f"Video {video_id} processing completed: "
@@ -141,12 +148,9 @@ async def process_video_task(video_id: int, fps:float=1.0, max_frames:Optional[i
     
     except Exception as e:
         # Mark video as failed
+        logger.error(f"Failed to process video {video_id}: {str(e)}")
         try:
-            video = Video.objects.get(id=video_id)
-            video.status = StatusChoices.FAILED
-            video.save(update_fields=['status', 'updated_at'])
+            Video.objects.filter(id=video_id).update(status=StatusChoices.FAILED)
         except:
             pass
-        
-        logger.error(f"Failed to process video {video_id}: {str(e)}")
         raise

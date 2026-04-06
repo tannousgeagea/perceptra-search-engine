@@ -1,8 +1,10 @@
+import asyncio
 import os
 import uvicorn
 import logging
 import inspect
 import importlib
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -22,8 +24,55 @@ ROUTERS = [
     if not f.endswith('__.py')
     ]
 
+@asynccontextmanager
+async def _wastevision_lifespan(app: FastAPI):
+    """Boot WasteVision stream manager and VLM worker pool on startup."""
+    try:
+        from django.conf import settings as djsettings
+        from asgiref.sync import sync_to_async
+        from wastevision.frame_capture import CameraStreamManager
+        from wastevision.service import WasteVisionService
+
+        frame_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+        stream_manager = CameraStreamManager(
+            frame_queue,
+            max_cameras=djsettings.WASTEVISION_MAX_CAMERAS,
+        )
+        vlm_service = WasteVisionService(frame_queue)
+
+        app.state.wv_frame_queue = frame_queue
+        app.state.wv_stream_manager = stream_manager
+        app.state.wv_vlm_service = vlm_service
+
+        # Start all active cameras
+        from wastevision.models import WasteCamera
+        active_cams = await sync_to_async(list)(
+            WasteCamera.objects.filter(is_active=True).select_related('tenant')
+        )
+        for cam in active_cams:
+            await stream_manager.add_camera(cam)
+
+        worker_task = asyncio.create_task(vlm_service.run_workers(), name="wv_vlm_workers")
+        logging.getLogger(__name__).info(
+            "WasteVision: lifespan started — %d active cameras", len(active_cams)
+        )
+    except Exception as e:
+        logging.getLogger(__name__).warning("WasteVision: lifespan init failed (non-fatal): %s", e)
+        worker_task = None
+
+    yield
+
+    if worker_task:
+        worker_task.cancel()
+        try:
+            await asyncio.gather(worker_task, return_exceptions=True)
+        except Exception:
+            pass
+    logging.getLogger(__name__).info("WasteVision: lifespan shutdown complete")
+
+
 def create_app() -> FastAPI:
-    
+
     import django
     django.setup()
     
@@ -35,7 +84,7 @@ def create_app() -> FastAPI:
     ]
 
     app = FastAPI(
-        openapi_tags = tags_meta,
+        openapi_tags=tags_meta,
         debug=True,
         title="Search Engine API",
         summary="",
@@ -43,9 +92,10 @@ def create_app() -> FastAPI:
         contact={
             "name": "Tannous Geagea",
             "url": "https://wasteant.com",
-            "email": "tannous.geagea@wasteant.com",            
+            "email": "tannous.geagea@wasteant.com",
         },
-        openapi_url="/openapi.json"
+        openapi_url="/openapi.json",
+        lifespan=_wastevision_lifespan,
     )
 
     origins = ["http://localhost:3000", os.getenv("FRONTEND_ENDPOINT")]
@@ -53,7 +103,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=origins,
         allow_methods=["*"],
-        allow_headers=["X-Requested-With", "X-Request-ID", "X-Organization-ID", "Authorization"],
+        allow_headers=["X-Requested-With", "X-Request-ID", "X-Organization-ID", "Authorization", "X-API-Key", "X-Tenant-ID", "X-Tenant-Domain"],
         expose_headers=["X-Request-ID", "X-Progress-ID", "x-response-time"],
     )
 

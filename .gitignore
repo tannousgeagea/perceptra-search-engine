@@ -203,7 +203,6 @@ db.sqlite3
 staticfiles/
 
 *.log
-*.json
 *.csv
 *.npy
 *.index
@@ -242,8 +241,7 @@ staticfiles/
 *.xlsx
 *.ppt
 *.pptx
-*.txt
-*.md    
+*.txt 
 
 
 qdrant_data/

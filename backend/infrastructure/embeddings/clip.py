@@ -7,7 +7,7 @@ from PIL import Image
 import time
 import logging
 
-from .base import (
+from infrastructure.embeddings.base import (
     BaseEmbeddingModel,
     ModelLoadError,
     EncodingError,
@@ -51,7 +51,7 @@ class CLIPEmbedding(BaseEmbeddingModel):
     
     def __init__(
         self,
-        model_variant: str = 'ViT-B-32',
+        model_name: str = 'ViT-B-32',
         device: Optional[str] = None,
         pretrained: Optional[str] = None,
         **kwargs
@@ -63,19 +63,19 @@ class CLIPEmbedding(BaseEmbeddingModel):
             )
         
         
-        if model_variant not in self.AVAILABLE_MODELS:
+        if model_name not in self.AVAILABLE_MODELS:
             raise ValueError(
-                f"Invalid CLIP variant: {model_variant}. "
+                f"Invalid CLIP variant: {model_name}. "
                 f"Available: {list(self.AVAILABLE_MODELS.keys())}"
             )
         
-        self.model_variant = model_variant
-        self.model_config = self.AVAILABLE_MODELS[model_variant]
+        self.model_variant = model_name
+        self.model_config = self.AVAILABLE_MODELS[model_name]
         self._embedding_dim = self.model_config['embedding_dim']
         self.pretrained = pretrained or self.model_config['pretrained']
 
         super().__init__(
-            model_name=f"clip-{model_variant.replace('/', '-').lower()}",
+            model_name=f"clip-{model_name.replace('/', '-').lower()}",
             device=device,
             **kwargs
         )
@@ -193,19 +193,32 @@ class CLIPEmbedding(BaseEmbeddingModel):
             logger.error(f"CLIP text encoding failed: {str(e)}")
             raise EncodingError(f"CLIP text encoding failed: {str(e)}")
     
+    MAX_BATCH_SIZE = 32
+
+    def _encode_images_chunk(self, pil_images: list) -> list:
+        """Encode a single chunk of PIL images."""
+        image_tensors = torch.stack([
+            self.preprocessor(img) for img in pil_images
+        ]).to(self.device)
+
+        with torch.no_grad():
+            image_features = self.model.encode_image(image_tensors)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+        return list(self._to_numpy(image_features))
+
     def encode_images_batch(
         self,
         images: List[Union[bytes, Image.Image, np.ndarray]]
     ) -> List[np.ndarray]:
-        """Encode multiple images in batch."""
+        """Encode multiple images in batch, automatically chunked to avoid OOM."""
         if not self._is_loaded:
             self.load()
-        
+
         if self.preprocessor is None or self.model is None:
             raise RuntimeError("Model or preprocessor not loaded")
-        
+
         try:
-            # Convert all to PIL Images
             pil_images = []
             for img in images:
                 if isinstance(img, bytes):
@@ -214,23 +227,16 @@ class CLIPEmbedding(BaseEmbeddingModel):
                     pil_images.append(Image.fromarray(img))
                 else:
                     pil_images.append(img)
-            
-            # Preprocess batch
-            image_tensors = torch.stack([
-                self.preprocessor(img) for img in pil_images
-            ]).to(self.device)
-            
-            # Encode batch
-            with torch.no_grad():
-                image_features = self.model.encode_image(image_tensors)
-                # Normalize
-                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-            
-            # Convert to numpy
-            embeddings = self._to_numpy(image_features)
-            
-            return list(embeddings)
-            
+
+            if len(pil_images) <= self.MAX_BATCH_SIZE:
+                return self._encode_images_chunk(pil_images)
+
+            results: list = []
+            for i in range(0, len(pil_images), self.MAX_BATCH_SIZE):
+                chunk = pil_images[i:i + self.MAX_BATCH_SIZE]
+                results.extend(self._encode_images_chunk(chunk))
+            return results
+
         except Exception as e:
             logger.error(f"CLIP batch encoding failed: {str(e)}")
             raise EncodingError(f"CLIP batch encoding failed: {str(e)}")

@@ -4,7 +4,15 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, s
 from typing import Annotated, Optional
 from datetime import datetime, timezone
 from tenants.context import RequestContext
-from media.models import Video, Image, Detection, StorageBackend as StorageBackendChoice
+from media.models import (
+    Video, 
+    Image, 
+    Detection, 
+    StorageBackend as StorageBackendChoice,
+    StatusChoices,
+    MediaType
+)
+from media.ledger import record_media
 from tenants.models import Tenant
 from media.utils import get_or_create_tags
 from ml.video_processing import VideoProcessor
@@ -19,6 +27,8 @@ from api.routers.upload.schemas import (
     TagInput,
     TagResponse,
 )
+from django.db.models import F
+from django.db import transaction
 from embeddings.tasks.image import process_image_task
 from embeddings.tasks.video import process_video_task
 from embeddings.tasks.detection import process_detection_task
@@ -96,7 +106,9 @@ async def _crop_and_upload(
     req: DetectionCreateRequest,
     image: Image,
     tenant: Tenant,
+    created_by,
     raw_bytes: Optional[bytes] = None,
+    created_by_api_key = None,
 ) -> tuple[bytes, str, str]:
     """
     Crop detection region from parent image, upload crop to storage.
@@ -142,6 +154,22 @@ async def _crop_and_upload(
                 'confidence': str(req.confidence),
             },
         )
+
+        # Ledger row — crop is now in storage
+        await record_media(
+            tenant=tenant,
+            media_type=MediaType.DETECTION,
+            storage_backend=image.storage_backend,
+            storage_key=storage_key,
+            filename=crop_filename,
+            file_size_bytes=len(crop_bytes),
+            content_type='image/jpeg',
+            file_format='jpg',
+            checksum=checksum,
+            created_by=created_by,
+            created_by_api_key=created_by_api_key,
+        )
+
     except Exception as e:
         logger.error(f"Failed to save detection crop to storage: {e}")
         storage_key = ''
@@ -152,6 +180,47 @@ async def _crop_and_upload(
 def _validate_backend(backend: str) -> None:
     if backend not in [c.value for c in StorageBackendChoice]:
         raise HTTPException(status_code=400, detail=f"Invalid storage backend: {backend}")
+
+@sync_to_async
+def _get_or_create_detection(image, req, checksum, storage_key, tenant, created_by, created_by_api_key):
+    """
+    Atomic duplicate guard. select_for_update locks the image row so
+    concurrent requests with identical detections serialize here rather
+    than both passing the existence check and creating two records.
+    """
+    with transaction.atomic():
+        # Lock the parent image row for the duration of this check+create
+        Image.objects.select_for_update().get(pk=image.pk)
+
+        existing = (
+            Detection.objects.filter(
+                image=image,
+                bbox_x=req.bbox_x, bbox_y=req.bbox_y,
+                bbox_width=req.bbox_width, bbox_height=req.bbox_height,
+                bbox_format=req.bbox_format, label=req.label,
+            ).first()
+            or Detection.objects.filter(image=image, checksum=checksum).first()
+        )
+        if existing:
+            return existing, False   # (instance, created)
+
+        detection = Detection.objects.create(
+            tenant=tenant,
+            image=image,
+            bbox_x=req.bbox_x, bbox_y=req.bbox_y,
+            bbox_width=req.bbox_width, bbox_height=req.bbox_height,
+            bbox_format=req.bbox_format,
+            label=req.label,
+            confidence=req.confidence,
+            storage_backend=image.storage_backend,
+            storage_key=storage_key,
+            checksum=checksum,
+            embedding_generated=False,
+            created_by=created_by,
+            updated_by=created_by,
+            created_by_api_key=created_by_api_key,
+        )
+        return detection, True       # (instance, created)
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +285,23 @@ async def upload_video(
             'filename': filename, 'plant_site': plant_site,
             'shift': shift, 'inspection_line': inspection_line,
             'recorded_at': recorded_dt.isoformat(),
+            'tags': tags,
         },
+    )
+
+    # Ledger row — file is now in storage
+    await record_media(
+        tenant=ctx.tenant,
+        media_type=MediaType.VIDEO,
+        storage_backend=backend,
+        storage_key=storage_key,
+        filename=filename,
+        file_size_bytes=len(file_bytes),
+        content_type=file.content_type or 'video/mp4',
+        file_format=file_format,
+        checksum=checksum,
+        created_by=ctx.effective_user,
+        created_by_api_key=ctx.effective_api_key,
     )
 
     tag_list = []
@@ -224,7 +309,7 @@ async def upload_video(
         try:
             tag_data = json.loads(tags)
             if isinstance(tag_data, list):
-                tag_list = await get_or_create_tags(tag_data, ctx.tenant, ctx.user)
+                tag_list = await get_or_create_tags(tag_data, ctx.tenant, ctx.effective_user)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid tags JSON")
 
@@ -241,9 +326,10 @@ async def upload_video(
         duration_seconds=duration_seconds,
         inspection_line=inspection_line,
         recorded_at=recorded_dt,
-        status='uploaded',
-        created_by=ctx.user,
-        updated_by=ctx.user,
+        status=StatusChoices.UPLOADED,
+        created_by=ctx.effective_user,
+        updated_by=ctx.effective_user,
+        created_by_api_key=ctx.effective_api_key,
     )
 
     if tag_list:
@@ -336,7 +422,23 @@ async def upload_image(
             'filename': filename, 'plant_site': plant_site,
             'shift': shift, 'inspection_line': inspection_line,
             'captured_at': captured_dt.isoformat(),
+            'tags': tags,
         },
+    )
+
+    # Ledger row — file is now in storage
+    await record_media(
+        tenant=ctx.tenant,
+        media_type=MediaType.IMAGE,
+        storage_backend=backend,
+        storage_key=storage_key,
+        filename=filename,
+        file_size_bytes=len(file_bytes),
+        content_type=file.content_type or 'image/jpeg',
+        file_format=file_format,
+        checksum=checksum,
+        created_by=ctx.effective_user,
+        created_by_api_key=ctx.effective_api_key,
     )
 
     tag_list = []
@@ -344,7 +446,7 @@ async def upload_image(
         try:
             tag_data = json.loads(tags)
             if isinstance(tag_data, list):
-                tag_list = await get_or_create_tags(tag_data, ctx.tenant, ctx.user)
+                tag_list = await get_or_create_tags(tag_data, ctx.tenant, ctx.effective_user)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid tags JSON")
 
@@ -364,9 +466,10 @@ async def upload_image(
         inspection_line=inspection_line,
         captured_at=captured_dt,
         checksum=checksum,
-        status='uploaded',
-        created_by=ctx.user,
-        updated_by=ctx.user,
+        status=StatusChoices.UPLOADED,
+        created_by=ctx.effective_user,
+        updated_by=ctx.effective_user,
+        created_by_api_key=ctx.effective_api_key,
     )
 
     if tag_list:
@@ -406,7 +509,7 @@ async def create_detection(
         if not (0 < request.bbox_width <= 1 and 0 < request.bbox_height <= 1):
             raise HTTPException(status_code=400, detail="Normalized bbox dimensions must be in (0, 1]")
 
-    _, checksum, storage_key = await _crop_and_upload(request, image, ctx.tenant)
+    _, checksum, storage_key = await _crop_and_upload(request, image, ctx.tenant, ctx.effective_user, created_by_api_key=ctx.effective_api_key,)
 
     existing = await _find_existing_detection(image, request, checksum)
     if existing:
@@ -422,27 +525,33 @@ async def create_detection(
     tag_list = []
     if request.tags:
         tag_list = await get_or_create_tags(
-            [t.model_dump() for t in request.tags], ctx.tenant, ctx.user
+            [t.model_dump() for t in request.tags], ctx.tenant, ctx.effective_user
         )
 
-    detection = await Detection.objects.acreate(
-        tenant=ctx.tenant,
-        image=image,
-        bbox_x=request.bbox_x,
-        bbox_y=request.bbox_y,
-        bbox_width=request.bbox_width,
-        bbox_height=request.bbox_height,
-        bbox_format=request.bbox_format,
-        label=request.label,
-        confidence=request.confidence,
-        storage_backend=image.storage_backend,
-        storage_key=storage_key,
-        checksum=checksum,
-        embedding_generated=False,
-        created_by=ctx.user,
-        updated_by=ctx.user,
+    detection, created = await _get_or_create_detection(
+        image, request, checksum, storage_key,
+        ctx.tenant, ctx.effective_user, ctx.effective_api_key
     )
 
+    if created:
+        # Increment detection_count on Image atomically.
+        # Also propagate to the parent Video if this image is a frame.
+        await sync_to_async(
+            Image.objects.filter(pk=image.pk).update
+        )(detection_count=F('detection_count') + 1)
+
+        if image.video_id:
+            await sync_to_async(
+                Video.objects.filter(pk=image.video_id).update
+            )(detection_count=F('detection_count') + 1)
+
+
+    if not created:
+        if not detection.embedding_generated:
+            process_detection_task.delay(detection.pk)  # type: ignore
+        tags_out = await sync_to_async(list)(detection.tags.all())
+        return _detection_response(detection, image, tags_out)
+    
     if tag_list:
         await sync_to_async(detection.tags.set)(tag_list)
 
@@ -484,6 +593,7 @@ async def create_detections_bulk(
     # Cache raw image bytes per image_id — avoids re-downloading the same
     # image for every detection that references it.
     raw_cache: dict[int, bytes] = {}
+    created_per_image: dict[int, int] = {}
 
     for det_req in request.detections:
         image = image_map[det_req.image_id]
@@ -493,7 +603,7 @@ async def create_detections_bulk(
                 raw_cache[det_req.image_id] = await storage.download(image.storage_key)
 
             _, checksum, storage_key = await _crop_and_upload(
-                det_req, image, ctx.tenant, raw_bytes=raw_cache[det_req.image_id]
+                det_req, image, ctx.tenant, ctx.effective_user, raw_bytes=raw_cache[det_req.image_id], created_by_api_key=ctx.effective_api_key,
             )
         except Exception as e:
             errors.append(f"Image {det_req.image_id}: crop failed — {e}")
@@ -509,27 +619,26 @@ async def create_detections_bulk(
         tag_list = []
         if det_req.tags:
             tag_list = await get_or_create_tags(
-                [t.model_dump() for t in det_req.tags], ctx.tenant, ctx.user
+                [t.model_dump() for t in det_req.tags], ctx.tenant, ctx.effective_user
             )
 
         try:
-            detection = await Detection.objects.acreate(
-                tenant=ctx.tenant,
-                image=image,
-                bbox_x=det_req.bbox_x,
-                bbox_y=det_req.bbox_y,
-                bbox_width=det_req.bbox_width,
-                bbox_height=det_req.bbox_height,
-                bbox_format=det_req.bbox_format,
-                label=det_req.label,
-                confidence=det_req.confidence,
-                storage_backend=image.storage_backend,
-                storage_key=storage_key,
-                checksum=checksum,
-                embedding_generated=False,
-                created_by=ctx.user,
-                updated_by=ctx.user,
+            detection, created = await _get_or_create_detection(
+                image, request, checksum, storage_key,
+                ctx.tenant, ctx.effective_user, ctx.effective_api_key
             )
+
+            if created:
+                created_per_image[det_req.image_id] = (
+                    created_per_image.get(det_req.image_id, 0) + 1
+                )
+
+            if not created:
+                if not detection.embedding_generated:
+                    process_detection_task.delay(detection.pk)  # type: ignore
+                tags_out = await sync_to_async(list)(detection.tags.all())
+                return _detection_response(detection, image, tags_out)
+
             if tag_list:
                 await sync_to_async(detection.tags.set)(tag_list)
 
@@ -540,6 +649,31 @@ async def create_detections_bulk(
             created_ids.append(detection.pk)
         except Exception as e:
             errors.append(f"Image {det_req.image_id}: DB create failed — {e}")
+
+    # Batch-update Image.detection_count — one UPDATE per unique image
+    # rather than one per detection.
+    if created_per_image:
+        for img_id, count in created_per_image.items():
+            await sync_to_async(
+                Image.objects.filter(pk=img_id).update
+            )(detection_count=F('detection_count') + count)
+
+        # Propagate to parent videos — load video_id for affected images once
+        affected_images = await sync_to_async(list)(
+            Image.objects.filter(pk__in=created_per_image.keys())
+            .exclude(video_id=None)
+            .values('video_id', 'pk')
+        )
+        video_counts: dict[int, int] = {}
+        for row in affected_images:
+            video_counts[row['video_id']] = (
+                video_counts.get(row['video_id'], 0)
+                + created_per_image[row['pk']]
+            )
+        for vid_id, count in video_counts.items():
+            await sync_to_async(
+                Video.objects.filter(pk=vid_id).update
+            )(detection_count=F('detection_count') + count)
 
     return BulkDetectionResponse(
         total=len(request.detections),

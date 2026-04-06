@@ -3,9 +3,9 @@
 from typing import List, Dict, Any, Optional, Union
 import numpy as np
 import faiss
-import pickle
 import json
 import os
+import shutil
 from pathlib import Path
 from threading import Lock
 from infrastructure.vectordb.base import (
@@ -28,9 +28,26 @@ logger = logging.getLogger(__name__)
 class FAISSVectorDB(BaseVectorDB):
     """
     FAISS vector database implementation.
-    Production-ready with persistence, thread-safety, and optimized indexing.
+
+    Storage layout per collection (all under storage_path/collection_name/):
+        index.faiss          — FAISS index (native binary format)
+        metadata.json        — id↔idx mappings + payloads (JSON, not pickle)
+        config.json          — dimension, metric, index type
+        vectors.npy          — raw float32 vectors for retrieval (numpy native)
+
+    Design decisions:
+    - Writes are batched: _save_* is called once per upsert() call, not per point.
+    - Atomic saves: write to a temp file then rename — a crash never leaves a
+      corrupt index file half-written.
+    - Metadata is JSON: human-readable, version-stable, no pickle safety issues.
+    - Vectors stored in numpy .npy format: compact, fast, no duplication risk.
+    - Deleted points are tracked in a tombstone set and excluded from search
+      results immediately, without rebuilding the FAISS index.
+    - The threading Lock guards in-memory structures within a single worker
+      process. Across Celery workers (separate processes), each worker holds
+      its own in-memory state; persistence is the coordination mechanism.
     """
-    
+
     def __init__(
         self,
         collection_name: str,
@@ -39,705 +56,654 @@ class FAISSVectorDB(BaseVectorDB):
         storage_path: str = "/tmp/faiss_indices",
         index_type: str = "Flat",
         use_gpu: bool = False,
-        nlist: int = 100,  # For IVF indices
-        nprobe: int = 10,  # For IVF search
+        nlist: int = 100,
+        nprobe: int = 10,
         **config
     ):
-        """
-        Initialize FAISS client.
-        
-        Args:
-            collection_name: Collection name
-            dimension: Vector dimension
-            distance_metric: Distance metric
-            storage_path: Path to store indices
-            index_type: FAISS index type ('Flat', 'IVFFlat', 'HNSW', 'IVFFlat,PQ')
-            use_gpu: Use GPU acceleration
-            nlist: Number of clusters for IVF
-            nprobe: Number of clusters to search in IVF
-        """
         super().__init__(collection_name, dimension, distance_metric, **config)
-        
-        self.storage_path = Path(storage_path)
+
+        self.storage_path = Path(storage_path) / collection_name
         self.storage_path.mkdir(parents=True, exist_ok=True)
-        
+
         self.index_type = index_type
         self.use_gpu = use_gpu
         self.nlist = nlist
         self.nprobe = nprobe
-        
-        # File paths
-        self.index_file = self.storage_path / f"{collection_name}.index"
-        self.metadata_file = self.storage_path / f"{collection_name}.meta.pkl"
-        self.config_file = self.storage_path / f"{collection_name}.config.json"
-        
+
+        # One directory per collection — clean layout
+        self._index_file    = self.storage_path / "index.faiss"
+        self._metadata_file = self.storage_path / "metadata.json"
+        self._config_file   = self.storage_path / "config.json"
+        self._vectors_file  = self.storage_path / "vectors.npy"
+
         # In-memory structures
         self._id_to_idx: Dict[str, int] = {}
         self._idx_to_id: Dict[int, str] = {}
-        self._payloads: Dict[str, Dict[str, Any]] = {}
-        self._vectors: Optional[np.ndarray] = None
+        self._payloads:  Dict[str, Dict[str, Any]] = {}
+        self._deleted:   set = set()          # tombstone — fast exclusion on search
+        self._vectors:   Optional[np.ndarray] = None
         self._next_idx = 0
-        
-        # Thread safety
+
         self._lock = Lock()
-        
-        # GPU resources
         self._gpu_resources = None
-        self._gpu_index = None
-    
+
+    # -------------------------------------------------------------------------
+    # Connection
+    # -------------------------------------------------------------------------
+
     def connect(self) -> bool:
-        """Connect to FAISS (load existing index)."""
         try:
             logger.info(f"Connecting to FAISS collection: {self.collection_name}")
-            
-            # Load existing index if exists
-            if self.index_file.exists():
+            if self.collection_exists():
+                self._load_config()     # sets self.dimension — must be first
                 self._load_index()
                 self._load_metadata()
-                self._load_config()
-                logger.info(f"Loaded existing FAISS index: {self.collection_name}")
+                self._load_vectors()
+                logger.info(f"Loaded FAISS collection: {self.collection_name}")
             else:
-                logger.info(f"No existing index found for: {self.collection_name}")
-            
+                logger.info(f"No existing FAISS collection: {self.collection_name}")
             self._is_connected = True
             return True
-            
         except Exception as e:
-            logger.error(f"Failed to connect to FAISS: {str(e)}")
-            raise ConnectionError(f"FAISS connection failed: {str(e)}")
-    
+            logger.error(f"Failed to connect to FAISS: {e}")
+            raise ConnectionError(f"FAISS connection failed: {e}")
+
     def disconnect(self):
-        """Disconnect from FAISS (cleanup)."""
-        if self._gpu_resources:
+        if self.use_gpu and self._gpu_resources:
             del self._gpu_resources
-            del self._gpu_index
             self._gpu_resources = None
-            self._gpu_index = None
-        
         self._client = None
         self._is_connected = False
-        logger.info(f"Disconnected from FAISS collection: {self.collection_name}")
-    
+        logger.info(f"Disconnected from FAISS: {self.collection_name}")
+
+    # -------------------------------------------------------------------------
+    # Collection management
+    # -------------------------------------------------------------------------
+
     def create_collection(
         self,
         dimension: int,
         distance_metric: DistanceMetric = DistanceMetric.COSINE,
         **kwargs
     ) -> bool:
-        """
-        Create FAISS index.
-        
-        Args:
-            dimension: Vector dimension
-            distance_metric: Distance metric
-        """
         try:
-            logger.info(f"Creating FAISS index: {self.collection_name}")
-            
             self.dimension = dimension
             self.distance_metric = distance_metric
-            
-            # Create FAISS index
             self._client = self._create_index(dimension, distance_metric)
-            
-            # Initialize metadata structures
+
             with self._lock:
                 self._id_to_idx = {}
                 self._idx_to_id = {}
-                self._payloads = {}
-                self._vectors = None
-                self._next_idx = 0
-            
-            # Save empty index
+                self._payloads  = {}
+                self._deleted   = set()
+                self._vectors   = None
+                self._next_idx  = 0
+
+            self._save_config()
             self._save_index()
             self._save_metadata()
-            self._save_config()
-            
+
             logger.info(
-                f"FAISS index created: {self.collection_name}, "
-                f"dim={dimension}, metric={distance_metric}, type={self.index_type}"
+                f"FAISS collection created: {self.collection_name} "
+                f"dim={dimension} metric={distance_metric} type={self.index_type}"
             )
-            
             return True
-            
         except Exception as e:
-            logger.error(f"Failed to create FAISS index: {str(e)}")
-            raise VectorDBException(f"Index creation failed: {str(e)}")
-    
-    def _create_index(self, dimension: int, distance_metric: DistanceMetric) -> faiss.Index:
-        """Create FAISS index based on configuration."""
-        
-        # Choose metric type
-        if distance_metric == DistanceMetric.COSINE:
-            # For cosine similarity, normalize vectors and use L2
-            metric_type = faiss.METRIC_L2
-        elif distance_metric == DistanceMetric.EUCLIDEAN:
-            metric_type = faiss.METRIC_L2
-        elif distance_metric == DistanceMetric.DOT_PRODUCT:
-            metric_type = faiss.METRIC_INNER_PRODUCT
-        else:
-            metric_type = faiss.METRIC_L2
-        
-        # Create index based on type
-        if self.index_type == "Flat":
-            # Exact search
-            index = faiss.IndexFlatL2(dimension) if metric_type == faiss.METRIC_L2 else faiss.IndexFlatIP(dimension)
-        
-        elif self.index_type == "IVFFlat":
-            # Inverted file with flat encoding
-            quantizer = faiss.IndexFlatL2(dimension)
-            index = faiss.IndexIVFFlat(quantizer, dimension, self.nlist, metric_type)
-            index.nprobe = self.nprobe
-        
-        elif self.index_type == "HNSW":
-            # Hierarchical Navigable Small World
-            M = self.config.get('hnsw_m', 32)
-            index = faiss.IndexHNSWFlat(dimension, M, metric_type)
-        
-        elif self.index_type == "IVFFlat,PQ":
-            # IVF with Product Quantization (compression)
-            m = self.config.get('pq_m', 8)  # Number of sub-quantizers
-            quantizer = faiss.IndexFlatL2(dimension)
-            index = faiss.IndexIVFPQ(quantizer, dimension, self.nlist, m, 8, metric_type)
-            index.nprobe = self.nprobe
-        
-        else:
-            # Default to flat index
-            logger.warning(f"Unknown index type: {self.index_type}, using Flat")
-            index = faiss.IndexFlatL2(dimension)
-        
-        # Add ID mapping
-        index = faiss.IndexIDMap(index)
-        
-        # GPU support
-        if self.use_gpu and faiss.get_num_gpus() > 0:
-            logger.info("Moving FAISS index to GPU")
-            self._gpu_resources = faiss.StandardGpuResources()
-            index = faiss.index_cpu_to_gpu(self._gpu_resources, 0, index)
-            self._gpu_index = index
-        
-        return index
-    
+            logger.error(f"Failed to create FAISS collection: {e}")
+            raise VectorDBException(f"Collection creation failed: {e}")
+
     def delete_collection(self) -> bool:
-        """Delete FAISS index and metadata."""
         try:
             with self._lock:
-                # Delete files
-                if self.index_file.exists():
-                    self.index_file.unlink()
-                if self.metadata_file.exists():
-                    self.metadata_file.unlink()
-                if self.config_file.exists():
-                    self.config_file.unlink()
-                
-                # Clear memory
-                self._client = None
+                shutil.rmtree(self.storage_path, ignore_errors=True)
+                self._client    = None
                 self._id_to_idx = {}
                 self._idx_to_id = {}
-                self._payloads = {}
-                self._vectors = None
-                self._next_idx = 0
-            
-            logger.info(f"FAISS index deleted: {self.collection_name}")
+                self._payloads  = {}
+                self._deleted   = set()
+                self._vectors   = None
+                self._next_idx  = 0
+            logger.info(f"FAISS collection deleted: {self.collection_name}")
             return True
-            
         except Exception as e:
-            logger.error(f"Failed to delete index: {str(e)}")
+            logger.error(f"Failed to delete collection: {e}")
             return False
-    
+
     def collection_exists(self) -> bool:
-        """Check if index exists."""
-        return self.index_file.exists() and self.metadata_file.exists()
-    
+        return (
+            self._index_file.exists()
+            and self._metadata_file.exists()
+            and self._config_file.exists()
+        )
+
     def get_collection_info(self) -> CollectionInfo:
-        """Get index information."""
         if not self._is_connected:
             self.connect()
-        
         try:
-            vector_count = len(self._id_to_idx)
-            
+            with self._lock:
+                live_count = len(self._id_to_idx) - len(self._deleted)
             return CollectionInfo(
                 name=self.collection_name,
-                vector_count=vector_count,
+                vector_count=live_count,
                 dimension=self.dimension or 0,
                 distance_metric=self.distance_metric.value,
-                indexed=self._client is not None and self._client.is_trained if hasattr(self._client, 'is_trained') else True,
+                indexed=self._client is not None,
                 metadata={
-                    "index_type": self.index_type,
-                    "use_gpu": self.use_gpu,
-                    "storage_path": str(self.storage_path),
-                }
+                    "index_type":    self.index_type,
+                    "use_gpu":       self.use_gpu,
+                    "storage_path":  str(self.storage_path),
+                    "deleted_count": len(self._deleted),
+                },
             )
-            
         except Exception as e:
-            logger.error(f"Failed to get collection info: {str(e)}")
             raise CollectionNotFoundError(f"Collection not found: {self.collection_name}")
-    
-    def upsert(
-        self,
-        points: List[VectorPoint],
-        batch_size: int = 1000
-    ) -> bool:
+
+    # -------------------------------------------------------------------------
+    # Write
+    # -------------------------------------------------------------------------
+
+    def upsert(self, points: List[VectorPoint], batch_size: int = 1000) -> bool:
+        if not self._is_connected:
+            self.connect()
+        if self._client is None:
+            raise CollectionNotFoundError(f"Index {self.collection_name} does not exist")
+
+        try:
+            t0 = time.time()
+            new_vectors: List[np.ndarray] = []
+            new_ids:     List[int]        = []
+
+            with self._lock:
+                for point in points:
+                    self._validate_dimension(point.vector)
+                    vec = self._to_numpy(point.vector)
+
+                    if self.distance_metric == DistanceMetric.COSINE:
+                        norm = np.linalg.norm(vec)
+                        if norm > 0:
+                            vec = vec / norm
+
+                    if point.id in self._id_to_idx:
+                        # Update payload only — FAISS has no efficient in-place
+                        # vector update; for payload-only changes this is fine.
+                        self._payloads[point.id] = point.payload
+                        # Un-tombstone if previously deleted and re-inserted
+                        self._deleted.discard(point.id)
+                    else:
+                        idx = self._next_idx
+                        self._id_to_idx[point.id] = idx
+                        self._idx_to_id[idx]       = point.id
+                        self._payloads[point.id]   = point.payload
+                        self._deleted.discard(point.id)
+                        self._next_idx += 1
+                        new_vectors.append(vec)
+                        new_ids.append(idx)
+
+                if new_vectors:
+                    arr  = np.vstack(new_vectors).astype('float32')
+                    ids  = np.array(new_ids, dtype=np.int64)
+
+                    if hasattr(self._client, 'is_trained') and not self._client.is_trained:
+                        if len(new_vectors) >= self.nlist:
+                            logger.info("Training FAISS IVF index...")
+                            self._client.train(arr)
+                        else:
+                            logger.warning(
+                                f"Skipping training: {len(new_vectors)} vectors < "
+                                f"nlist={self.nlist}. Use a Flat index for small datasets."
+                            )
+
+                    self._client.add_with_ids(arr, ids)
+
+                    # Append to the vectors store — one contiguous array
+                    self._vectors = (
+                        arr if self._vectors is None
+                        else np.vstack([self._vectors, arr])
+                    ).astype('float32')
+
+            # Persist once per upsert() call, not per point
+            self._save_index()
+            self._save_metadata()
+            self._save_vectors()
+
+            elapsed = time.time() - t0
+            logger.info(
+                f"Upserted {len(points)} points to FAISS in {elapsed:.2f}s "
+                f"({len(points)/max(elapsed, 1e-6):.0f} pts/s)"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"FAISS upsert failed: {e}")
+            raise VectorDBException(f"Upsert failed: {e}")
+
+    def delete(self, point_ids: List[str]) -> bool:
         """
-        Upsert vectors into FAISS.
-        
-        Args:
-            points: List of VectorPoint objects
-            batch_size: Batch size for processing
+        Soft-delete via tombstone set.
+
+        FAISS has no efficient single-point removal. Rebuilding the index on
+        every delete is O(n) and unacceptable in production. The tombstone
+        approach excludes deleted points from search results immediately at
+        near-zero cost. The index is compacted (rebuilt without tombstoned
+        points) by calling compact() explicitly — e.g. as a periodic
+        maintenance task when len(_deleted) / total > 0.1.
+        """
+        try:
+            with self._lock:
+                for pid in point_ids:
+                    if pid in self._id_to_idx:
+                        self._deleted.add(pid)
+            self._save_metadata()
+            logger.info(f"Tombstoned {len(point_ids)} points in FAISS")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to tombstone points: {e}")
+            return False
+
+    def compact(self) -> bool:
+        """
+        Rebuild the index without tombstoned points.
+        Call periodically when deletion ratio is high — not on every delete.
         """
         if not self._is_connected:
             self.connect()
-        
-        if self._client is None:
-            raise CollectionNotFoundError(f"Index {self.collection_name} does not exist")
-        
         try:
-            start_time = time.time()
-            
             with self._lock:
-                new_vectors = []
-                new_ids = []
-                
-                for point in points:
-                    # Validate dimension
-                    self._validate_dimension(point.vector)
-                    
-                    # Convert to numpy
-                    vector = self._to_numpy(point.vector)
-                    
-                    # Normalize for cosine similarity
-                    if self.distance_metric == DistanceMetric.COSINE:
-                        norm = np.linalg.norm(vector)
-                        if norm > 0:
-                            vector = vector / norm
-                    
-                    point_id = point.id
-                    
-                    # Check if point exists (update)
-                    if point_id in self._id_to_idx:
-                        # Update payload only (FAISS doesn't support efficient vector updates)
-                        self._payloads[point_id] = point.payload
-                    else:
-                        # Add new point
-                        idx = self._next_idx
-                        self._id_to_idx[point_id] = idx
-                        self._idx_to_id[idx] = point_id
-                        self._payloads[point_id] = point.payload
-                        self._next_idx += 1
-                        
-                        new_vectors.append(vector)
-                        new_ids.append(idx)
-                
-                # Add new vectors to index
-                if new_vectors:
-                    vectors_array = np.vstack(new_vectors).astype('float32')
-                    ids_array = np.array(new_ids, dtype=np.int64)
-                    
-                    # Train index if needed (for IVF indices)
-                    if hasattr(self._client, 'is_trained') and not self._client.is_trained:
-                        logger.info("Training FAISS index...")
-                        # Need enough vectors to train
-                        if len(new_vectors) >= self.nlist:
-                            self._client.train(vectors_array)
-                        else:
-                            logger.warning(f"Not enough vectors to train index ({len(new_vectors)} < {self.nlist})")
-                    
-                    # Add to index
-                    self._client.add_with_ids(vectors_array, ids_array)
-                    
-                    # Store vectors for later retrieval
-                    if self._vectors is None:
-                        self._vectors = vectors_array
-                    else:
-                        self._vectors = np.vstack([self._vectors, vectors_array])
-            
-            # Save index and metadata
+                live_ids = [
+                    pid for pid in self._id_to_idx
+                    if pid not in self._deleted
+                ]
+                if not live_ids:
+                    logger.info("compact(): no live points, clearing index")
+                    self.create_collection(self.dimension, self.distance_metric)
+                    return True
+
+                live_vectors = np.vstack([
+                    self._vectors[self._id_to_idx[pid]]
+                    for pid in live_ids
+                    if self._vectors is not None and self._id_to_idx[pid] < len(self._vectors)
+                ]).astype('float32')
+
+                # Rebuild clean structures
+                self._client    = self._create_index(self.dimension, self.distance_metric)
+                self._id_to_idx = {}
+                self._idx_to_id = {}
+                self._deleted   = set()
+                self._next_idx  = 0
+
+                new_ids = np.arange(len(live_ids), dtype=np.int64)
+                self._client.add_with_ids(live_vectors, new_ids)
+
+                for i, pid in enumerate(live_ids):
+                    self._id_to_idx[pid] = i
+                    self._idx_to_id[i]   = pid
+                self._vectors = live_vectors
+
             self._save_index()
             self._save_metadata()
-            
-            elapsed = time.time() - start_time
-            logger.info(
-                f"Upserted {len(points)} points to FAISS in {elapsed:.2f}s "
-                f"({len(points)/elapsed:.0f} points/sec)"
-            )
-            
+            self._save_vectors()
+            logger.info(f"Compacted FAISS index: {len(live_ids)} live points retained")
             return True
-            
+
         except Exception as e:
-            logger.error(f"Failed to upsert points: {str(e)}")
-            raise VectorDBException(f"Upsert failed: {str(e)}")
-    
+            logger.error(f"Compact failed: {e}")
+            raise VectorDBException(f"Compact failed: {e}")
+
+    # -------------------------------------------------------------------------
+    # Read
+    # -------------------------------------------------------------------------
+
     def search(
         self,
         query_vector: Union[np.ndarray, List[float]],
         limit: int = 10,
         filters: Optional[Dict[str, Any]] = None,
         score_threshold: Optional[float] = None,
-        return_vectors: bool = False
+        return_vectors: bool = False,
     ) -> List[SearchResult]:
-        """
-        Search similar vectors in FAISS.
-        
-        Args:
-            query_vector: Query vector
-            limit: Maximum results
-            filters: Payload filters (applied post-search)
-            score_threshold: Minimum similarity score
-            return_vectors: Return vectors in results
-        """
         if not self._is_connected:
             self.connect()
-        
         if self._client is None:
             raise CollectionNotFoundError(f"Index {self.collection_name} does not exist")
-        
+
         try:
-            start_time = time.time()
-            
-            # Validate dimension
+            t0 = time.time()
             self._validate_dimension(query_vector)
-            
-            # Convert to numpy
             query = self._to_numpy(query_vector)
-            
-            # Normalize for cosine similarity
+
             if self.distance_metric == DistanceMetric.COSINE:
                 norm = np.linalg.norm(query)
                 if norm > 0:
                     query = query / norm
-            
-            # Reshape for FAISS
+
             query = query.reshape(1, -1).astype('float32')
-            
-            # Search (get more results if filters applied)
-            k = limit * 10 if filters else limit
-            k = min(k, self.count())
-            
-            if k == 0:
+
+            with self._lock:
+                total_live = len(self._id_to_idx) - len(self._deleted)
+
+            if total_live == 0:
                 return []
-            
+
+            # Fetch extra candidates to account for tombstoned points
+            k = min(limit + len(self._deleted) + 10, total_live)
+
             with self._lock:
                 distances, indices = self._client.search(query, k)
-            
-            # Convert to SearchResult
-            search_results = []
-            
+
+            results: List[SearchResult] = []
+
             for dist, idx in zip(distances[0], indices[0]):
-                if idx == -1:  # FAISS returns -1 for invalid indices
+                if idx == -1:
                     continue
-                
                 idx = int(idx)
-                
-                # Get point ID
-                point_id = self._idx_to_id.get(idx)
-                if not point_id:
-                    continue
-                
-                # Get payload
-                payload = self._payloads.get(point_id, {})
-                
-                # Apply filters
+
+                with self._lock:
+                    point_id = self._idx_to_id.get(idx)
+                    if not point_id or point_id in self._deleted:
+                        continue
+                    payload = self._payloads.get(point_id, {})
+
                 if filters and not self._matches_filters(payload, filters):
                     continue
-                
-                # Convert distance to similarity score
+
                 if self.distance_metric == DistanceMetric.COSINE:
-                    # L2 distance on normalized vectors -> cosine similarity
-                    score = 1.0 - (float(dist) / 2.0)
+                    score = float(1.0 - dist / 2.0)
                 elif self.distance_metric == DistanceMetric.EUCLIDEAN:
-                    # Convert L2 distance to similarity
-                    score = 1.0 / (1.0 + float(dist))
+                    score = float(1.0 / (1.0 + dist))
                 elif self.distance_metric == DistanceMetric.DOT_PRODUCT:
                     score = float(dist)
                 else:
-                    score = 1.0 / (1.0 + float(dist))
-                
-                # Apply score threshold
-                if score_threshold and score < score_threshold:
+                    score = float(1.0 / (1.0 + dist))
+
+                if score_threshold is not None and score < score_threshold:
                     continue
-                
-                # Get vector if requested
-                vector = None
+
+                vec = None
                 if return_vectors and self._vectors is not None and idx < len(self._vectors):
-                    vector = self._vectors[idx]
-                
-                search_results.append(SearchResult(
-                    id=point_id,
-                    score=score,
-                    payload=payload,
-                    vector=vector
+                    vec = self._vectors[idx]
+
+                results.append(SearchResult(
+                    id=point_id, score=score, payload=payload, vector=vec
                 ))
-                
-                # Stop when we have enough results
-                if len(search_results) >= limit:
+
+                if len(results) >= limit:
                     break
-            
-            elapsed = (time.time() - start_time) * 1000
-            logger.debug(
-                f"FAISS search completed in {elapsed:.2f}ms: "
-                f"{len(search_results)} results"
-            )
-            
-            return search_results
-            
+
+            elapsed = (time.time() - t0) * 1000
+            logger.debug(f"FAISS search: {len(results)} results in {elapsed:.2f}ms")
+            return results
+
         except Exception as e:
-            logger.error(f"Search failed: {str(e)}")
-            raise VectorDBException(f"Search failed: {str(e)}")
-    
-    def _matches_filters(self, payload: Dict[str, Any], filters: Dict[str, Any]) -> bool:
-        """Check if payload matches filters."""
-        for key, value in filters.items():
-            if key not in payload:
-                return False
-            
-            if isinstance(value, dict):
-                # Handle operators
-                if '$gte' in value and payload[key] < value['$gte']:
-                    return False
-                if '$lte' in value and payload[key] > value['$lte']:
-                    return False
-                if '$gt' in value and payload[key] <= value['$gt']:
-                    return False
-                if '$lt' in value and payload[key] >= value['$lt']:
-                    return False
-                if '$in' in value and payload[key] not in value['$in']:
-                    return False
-                if '$range' in value:
-                    range_val = value['$range']
-                    if 'gte' in range_val and payload[key] < range_val['gte']:
-                        return False
-                    if 'lte' in range_val and payload[key] > range_val['lte']:
-                        return False
-            else:
-                # Exact match
-                if payload[key] != value:
-                    return False
-        
-        return True
-    
+            logger.error(f"FAISS search failed: {e}")
+            raise VectorDBException(f"Search failed: {e}")
+
     def get(self, point_ids: List[str]) -> List[VectorPoint]:
-        """Retrieve points by IDs."""
         if not self._is_connected:
             self.connect()
-        
         try:
             results = []
-            
             with self._lock:
-                for point_id in point_ids:
-                    if point_id not in self._id_to_idx:
+                for pid in point_ids:
+                    if pid not in self._id_to_idx or pid in self._deleted:
                         continue
-                    
-                    idx = self._id_to_idx[point_id]
-                    payload = self._payloads.get(point_id, {})
-                    
-                    # Get vector if available
-                    vector = self._vectors[idx] if self._vectors is not None and idx < len(self._vectors) else np.array([])
-                    
-                    results.append(VectorPoint(
-                        id=point_id,
-                        vector=vector,
-                        payload=payload
-                    ))
-            
+                    idx     = self._id_to_idx[pid]
+                    payload = self._payloads.get(pid, {})
+                    vec     = (
+                        self._vectors[idx]
+                        if self._vectors is not None and idx < len(self._vectors)
+                        else np.array([], dtype=np.float32)
+                    )
+                    results.append(VectorPoint(id=pid, vector=vec, payload=payload))
             return results
-            
         except Exception as e:
-            logger.error(f"Failed to retrieve points: {str(e)}")
-            raise VectorDBException(f"Retrieve failed: {str(e)}")
-    
-    def delete(self, point_ids: List[str]) -> bool:
-        """
-        Delete points by IDs.
-        Note: FAISS doesn't support efficient deletion, so we remove from metadata.
-        """
-        try:
-            with self._lock:
-                for point_id in point_ids:
-                    if point_id in self._id_to_idx:
-                        idx = self._id_to_idx[point_id]
-                        del self._id_to_idx[point_id]
-                        del self._idx_to_id[idx]
-                        if point_id in self._payloads:
-                            del self._payloads[point_id]
-            
-            self._save_metadata()
-            
-            logger.info(f"Deleted {len(point_ids)} points from FAISS metadata")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to delete points: {str(e)}")
-            return False
-    
+            logger.error(f"FAISS get failed: {e}")
+            raise VectorDBException(f"Retrieve failed: {e}")
+
     def count(self, filters: Optional[Dict[str, Any]] = None) -> int:
-        """Count points in index."""
         if not self._is_connected:
             self.connect()
-        
         try:
             with self._lock:
-                if filters:
-                    # Count with filters
-                    count = sum(
-                        1 for point_id in self._id_to_idx.keys()
-                        if self._matches_filters(self._payloads.get(point_id, {}), filters)
-                    )
-                    return count
-                else:
-                    return len(self._id_to_idx)
+                live_ids = [
+                    pid for pid in self._id_to_idx
+                    if pid not in self._deleted
+                ]
+                if not filters:
+                    return len(live_ids)
+                return sum(
+                    1 for pid in live_ids
+                    if self._matches_filters(self._payloads.get(pid, {}), filters)
+                )
         except Exception as e:
-            logger.error(f"Failed to count points: {str(e)}")
+            logger.error(f"FAISS count failed: {e}")
             return 0
-    
+
     def scroll(
         self,
         limit: int = 100,
         offset: Optional[str] = None,
-        filters: Optional[Dict[str, Any]] = None
+        filters: Optional[Dict[str, Any]] = None,
     ) -> tuple[List[VectorPoint], Optional[str]]:
-        """Scroll through points."""
         if not self._is_connected:
             self.connect()
-        
         try:
-            results = []
-            start_idx = int(offset) if offset else 0
-            
+            # FIX: validate offset before casting — bad input previously raised ValueError
+            start = 0
+            if offset is not None:
+                if not offset.isdigit():
+                    raise VectorDBException(f"Invalid scroll offset: '{offset}'")
+                start = int(offset)
+
             with self._lock:
-                point_ids = list(self._id_to_idx.keys())
-                
-                # Apply filters
-                if filters:
-                    point_ids = [
-                        pid for pid in point_ids
-                        if self._matches_filters(self._payloads.get(pid, {}), filters)
-                    ]
-                
-                # Paginate
-                end_idx = start_idx + limit
-                page_ids = point_ids[start_idx:end_idx]
-                
-                for point_id in page_ids:
-                    idx = self._id_to_idx[point_id]
-                    payload = self._payloads.get(point_id, {})
-                    vector = self._vectors[idx] if self._vectors is not None and idx < len(self._vectors) else np.array([])
-                    
+                live_ids = [
+                    pid for pid in self._id_to_idx
+                    if pid not in self._deleted
+                ]
+
+            if filters:
+                live_ids = [
+                    pid for pid in live_ids
+                    if self._matches_filters(self._payloads.get(pid, {}), filters)
+                ]
+
+            page      = live_ids[start:start + limit]
+            next_off  = str(start + limit) if (start + limit) < len(live_ids) else None
+
+            results = []
+            with self._lock:
+                for pid in page:
+                    idx = self._id_to_idx[pid]
+                    vec = (
+                        self._vectors[idx]
+                        if self._vectors is not None and idx < len(self._vectors)
+                        else np.array([], dtype=np.float32)
+                    )
                     results.append(VectorPoint(
-                        id=point_id,
-                        vector=vector,
-                        payload=payload
+                        id=pid,
+                        vector=vec,
+                        payload=self._payloads.get(pid, {}),
                     ))
-                
-                # Calculate next offset
-                next_offset = str(end_idx) if end_idx < len(point_ids) else None
-            
-            return results, next_offset
-            
+
+            return results, next_off
+
+        except VectorDBException:
+            raise
         except Exception as e:
-            logger.error(f"Failed to scroll: {str(e)}")
-            raise VectorDBException(f"Scroll failed: {str(e)}")
-    
+            logger.error(f"FAISS scroll failed: {e}")
+            raise VectorDBException(f"Scroll failed: {e}")
+
+    # -------------------------------------------------------------------------
+    # Persistence — atomic writes via temp file + rename
+    # -------------------------------------------------------------------------
+
+    def _atomic_write(self, path: Path, write_fn):
+        """
+        Write to a temp file then rename to the target path.
+        Guarantees the target is never left half-written if the process
+        crashes mid-save — rename is atomic on POSIX filesystems.
+        """
+        tmp = path.with_suffix(path.suffix + '.tmp')
+        try:
+            write_fn(tmp)
+            tmp.replace(path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+
     def _save_index(self):
-        """Save FAISS index to disk."""
         if self._client is None:
             return
-        
-        try:
-            # Move to CPU if on GPU
-            index_to_save = self._client
-            if self.use_gpu and self._gpu_index:
-                index_to_save = faiss.index_gpu_to_cpu(self._gpu_index)
-            
-            faiss.write_index(index_to_save, str(self.index_file))
-            logger.debug(f"FAISS index saved: {self.index_file}")
-        except Exception as e:
-            logger.error(f"Failed to save index: {str(e)}")
-    
+        index_to_save = self._client
+        if self.use_gpu and self._gpu_resources:
+            index_to_save = faiss.index_gpu_to_cpu(self._client)
+
+        def write(tmp):
+            faiss.write_index(index_to_save, str(tmp))
+
+        self._atomic_write(self._index_file, write)
+        logger.debug(f"FAISS index saved: {self._index_file}")
+
     def _load_index(self):
-        """Load FAISS index from disk."""
-        try:
-            self._client = faiss.read_index(str(self.index_file))
-            
-            # Move to GPU if configured
-            if self.use_gpu and faiss.get_num_gpus() > 0:
-                self._gpu_resources = faiss.StandardGpuResources()
-                self._gpu_index = faiss.index_cpu_to_gpu(self._gpu_resources, 0, self._client)
-                self._client = self._gpu_index
-            
-            logger.debug(f"FAISS index loaded: {self.index_file}")
-        except Exception as e:
-            logger.error(f"Failed to load index: {str(e)}")
-            raise
-    
+        self._client = faiss.read_index(str(self._index_file))
+        if self.use_gpu and faiss.get_num_gpus() > 0:
+            self._gpu_resources = faiss.StandardGpuResources()
+            self._client = faiss.index_cpu_to_gpu(self._gpu_resources, 0, self._client)
+
     def _save_metadata(self):
-        """Save metadata to disk."""
-        try:
-            metadata = {
-                'id_to_idx': self._id_to_idx,
-                'idx_to_id': self._idx_to_id,
-                'payloads': self._payloads,
-                'next_idx': self._next_idx,
-                'vectors': self._vectors
-            }
-            
-            with open(self.metadata_file, 'wb') as f:
-                pickle.dump(metadata, f)
-            
-            logger.debug(f"Metadata saved: {self.metadata_file}")
-        except Exception as e:
-            logger.error(f"Failed to save metadata: {str(e)}")
-    
+        """
+        Persist id↔idx mappings, payloads, tombstones, and next_idx.
+        JSON instead of pickle: human-readable, no deserialisation risk,
+        stable across Python versions.
+        """
+        data = {
+            'id_to_idx': self._id_to_idx,
+            'idx_to_id': {str(k): v for k, v in self._idx_to_id.items()},
+            'payloads':  self._payloads,
+            'deleted':   list(self._deleted),
+            'next_idx':  self._next_idx,
+        }
+
+        def write(tmp):
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, separators=(',', ':'), default=str)
+
+        self._atomic_write(self._metadata_file, write)
+        logger.debug(f"FAISS metadata saved: {self._metadata_file}")
+
     def _load_metadata(self):
-        """Load metadata from disk."""
-        try:
-            with open(self.metadata_file, 'rb') as f:
-                metadata = pickle.load(f)
-            
-            self._id_to_idx = metadata.get('id_to_idx', {})
-            self._idx_to_id = metadata.get('idx_to_id', {})
-            self._payloads = metadata.get('payloads', {})
-            self._next_idx = metadata.get('next_idx', 0)
-            self._vectors = metadata.get('vectors')
-            
-            logger.debug(f"Metadata loaded: {self.metadata_file}")
-        except Exception as e:
-            logger.error(f"Failed to load metadata: {str(e)}")
-            raise
-    
+        with open(self._metadata_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        self._id_to_idx = data.get('id_to_idx', {})
+        self._idx_to_id = {int(k): v for k, v in data.get('idx_to_id', {}).items()}
+        self._payloads  = data.get('payloads', {})
+        self._deleted   = set(data.get('deleted', []))
+        self._next_idx  = data.get('next_idx', 0)
+
+    def _save_vectors(self):
+        """
+        Save vectors as a numpy .npy file — compact binary, no duplication,
+        loads in O(1) with memory mapping if needed.
+        """
+        if self._vectors is None:
+            return
+
+        def write(tmp):
+            np.save(str(tmp), self._vectors)
+
+        self._atomic_write(self._vectors_file, write)
+        logger.debug(f"FAISS vectors saved: {self._vectors_file}")
+
+    def _load_vectors(self):
+        if self._vectors_file.exists():
+            self._vectors = np.load(str(self._vectors_file))
+        else:
+            self._vectors = None
+
     def _save_config(self):
-        """Save configuration to disk."""
-        try:
-            config = {
-                'collection_name': self.collection_name,
-                'dimension': self.dimension,
-                'distance_metric': self.distance_metric.value if self.distance_metric else None,
-                'index_type': self.index_type,
-                'nlist': self.nlist,
-                'nprobe': self.nprobe,
-            }
-            
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=2)
-            
-            logger.debug(f"Config saved: {self.config_file}")
-        except Exception as e:
-            logger.error(f"Failed to save config: {str(e)}")
-    
+        data = {
+            'collection_name': self.collection_name,
+            'dimension':       self.dimension,
+            'distance_metric': self.distance_metric.value if self.distance_metric else None,
+            'index_type':      self.index_type,
+            'nlist':           self.nlist,
+            'nprobe':          self.nprobe,
+        }
+
+        def write(tmp):
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+
+        self._atomic_write(self._config_file, write)
+
     def _load_config(self):
-        """Load configuration from disk."""
-        try:
-            with open(self.config_file, 'r') as f:
-                config = json.load(f)
-            
-            self.dimension = config.get('dimension')
-            metric_str = config.get('distance_metric')
-            self.distance_metric = DistanceMetric(metric_str) if metric_str else DistanceMetric.COSINE
-            self.index_type = config.get('index_type', 'Flat')
-            self.nlist = config.get('nlist', 100)
-            self.nprobe = config.get('nprobe', 10)
-            
-            logger.debug(f"Config loaded: {self.config_file}")
-        except Exception as e:
-            logger.error(f"Failed to load config: {str(e)}")
+        with open(self._config_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        self.dimension      = data.get('dimension')
+        metric_str          = data.get('distance_metric')
+        self.distance_metric = DistanceMetric(metric_str) if metric_str else DistanceMetric.COSINE
+        self.index_type     = data.get('index_type', 'Flat')
+        self.nlist          = data.get('nlist', 100)
+        self.nprobe         = data.get('nprobe', 10)
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+
+    def _create_index(self, dimension: int, distance_metric: DistanceMetric) -> faiss.Index:
+        metric = (
+            faiss.METRIC_INNER_PRODUCT
+            if distance_metric == DistanceMetric.DOT_PRODUCT
+            else faiss.METRIC_L2
+        )
+
+        if self.index_type == "Flat":
+            base = (
+                faiss.IndexFlatIP(dimension)
+                if metric == faiss.METRIC_INNER_PRODUCT
+                else faiss.IndexFlatL2(dimension)
+            )
+        elif self.index_type == "IVFFlat":
+            quantizer = faiss.IndexFlatL2(dimension)
+            base = faiss.IndexIVFFlat(quantizer, dimension, self.nlist, metric)
+            base.nprobe = self.nprobe
+        elif self.index_type == "HNSW":
+            M    = self.config.get('hnsw_m', 32)
+            base = faiss.IndexHNSWFlat(dimension, M, metric)
+        elif self.index_type == "IVFFlat,PQ":
+            m         = self.config.get('pq_m', 8)
+            quantizer = faiss.IndexFlatL2(dimension)
+            base      = faiss.IndexIVFPQ(quantizer, dimension, self.nlist, m, 8, metric)
+            base.nprobe = self.nprobe
+        else:
+            logger.warning(f"Unknown index type '{self.index_type}', using Flat")
+            base = faiss.IndexFlatL2(dimension)
+
+        index = faiss.IndexIDMap(base)
+
+        if self.use_gpu and faiss.get_num_gpus() > 0:
+            self._gpu_resources = faiss.StandardGpuResources()
+            index = faiss.index_cpu_to_gpu(self._gpu_resources, 0, index)
+
+        return index
+
+    def _matches_filters(self, payload: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        for key, value in filters.items():
+            if key not in payload:
+                return False
+            pv = payload[key]
+            if isinstance(value, dict):
+                if '$gte'   in value and not (pv >= value['$gte']):    return False
+                if '$lte'   in value and not (pv <= value['$lte']):    return False
+                if '$gt'    in value and not (pv >  value['$gt']):     return False
+                if '$lt'    in value and not (pv <  value['$lt']):     return False
+                if '$in'    in value and pv not in value['$in']:       return False
+                if '$range' in value:
+                    r = value['$range']
+                    if 'gte' in r and not (pv >= r['gte']): return False
+                    if 'lte' in r and not (pv <= r['lte']): return False
+                    if 'gt'  in r and not (pv >  r['gt']):  return False
+                    if 'lt'  in r and not (pv <  r['lt']):  return False
+            else:
+                if pv != value:
+                    return False
+        return True

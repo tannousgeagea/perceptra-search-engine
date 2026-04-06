@@ -35,6 +35,8 @@ class ImageSearchRequest(BaseModel):
     search_type: Literal['images', 'detections', 'both'] = 'detections'
     filters: Optional[SearchFilterParams] = None
     return_vectors: bool = False
+    enable_reranking: bool = Field(default=True, description='Enable label-semantic re-ranking')
+    reranking_alpha: float = Field(default=0.8, ge=0.0, le=1.0, description='Blend weight: alpha*visual + (1-alpha)*metadata')
 
 
 class TextSearchRequest(BaseModel):
@@ -45,6 +47,8 @@ class TextSearchRequest(BaseModel):
     search_type: Literal['images', 'detections', 'both'] = 'detections'
     filters: Optional[SearchFilterParams] = None
     return_vectors: bool = False
+    enable_reranking: bool = Field(default=True, description='Enable label-semantic re-ranking')
+    reranking_alpha: float = Field(default=0.8, ge=0.0, le=1.0, description='Blend weight: alpha*visual + (1-alpha)*metadata')
 
 
 class HybridSearchRequest(BaseModel):
@@ -56,6 +60,8 @@ class HybridSearchRequest(BaseModel):
     search_type: Literal['images', 'detections', 'both'] = 'detections'
     filters: Optional[SearchFilterParams] = None
     return_vectors: bool = False
+    enable_reranking: bool = Field(default=True, description='Enable label-semantic re-ranking')
+    reranking_alpha: float = Field(default=0.8, ge=0.0, le=1.0, description='Blend weight: alpha*visual + (1-alpha)*metadata')
 
 
 class SimilaritySearchRequest(BaseModel):
@@ -174,10 +180,78 @@ class SearchHistoryItem(BaseModel):
     }
 
 
+class PaginationMetadata(BaseModel):
+    page: int
+    page_size: int
+    total_items: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
+
+
+class SearchHistoryResponse(BaseModel):
+    """Paginated search history response."""
+    items: List[SearchHistoryItem]
+    pagination: PaginationMetadata
+    filters_applied: dict = {}
+
+
 class SearchStatsResponse(BaseModel):
     """Search statistics."""
     total_searches: int
     searches_today: int
+    searches_yesterday: int = 0
     avg_execution_time_ms: float
     most_searched_labels: List[dict]
     search_type_distribution: dict
+
+
+class SearchVolumeDay(BaseModel):
+    """Daily search volume for time-series chart."""
+    date: str
+    day: str
+    searches: int
+    detections: int
+
+
+class ActivityItem(BaseModel):
+    """Recent activity feed item."""
+    type: str
+    msg: str
+    time: str
+    tag: str
+
+
+# ── Degradation search ────────────────────────────────────────
+
+class DegradationSearchRequest(BaseModel):
+    """Search for locations with similar degradation patterns."""
+    image_id: int = Field(..., description="Reference image ID to compute delta from")
+    top_k: int = Field(default=10, ge=1, le=100)
+    min_magnitude: float = Field(default=0.0, ge=0.0, le=2.0,
+                                  description="Minimum change magnitude to include")
+    plant_site: Optional[str] = None
+
+
+class DegradationResult(BaseModel):
+    """A single degradation pattern match."""
+    delta_id: str
+    similarity_score: float
+    plant_site: Optional[str]
+    inspection_line: Optional[str]
+    from_image_id: Optional[int]
+    to_image_id: Optional[int]
+    from_captured_at: Optional[str]
+    to_captured_at: Optional[str]
+    time_span_days: Optional[float]
+    magnitude: Optional[float]
+
+
+class DegradationSearchResponse(BaseModel):
+    """Response for degradation pattern search."""
+    query_id: UUID4
+    search_type: str = 'degradation'
+    results: List[DegradationResult]
+    total_results: int
+    execution_time_ms: int
+    reference_image_id: int

@@ -194,9 +194,6 @@ class MediaLibraryService:
         queryset = queryset.prefetch_related(
             'tags',
             Prefetch('frames', queryset=Image.objects.all()),
-        ).annotate(
-            frame_count=Count('frames', distinct=True),
-            detection_count=Count('frames__detections', distinct=True)
         )
         
         # Pagination
@@ -232,9 +229,7 @@ class MediaLibraryService:
         queryset = queryset.order_by(order_field)
         
         # Prefetch related data
-        queryset = queryset.select_related('video').prefetch_related('tags').annotate(
-            detection_count=Count('detections', distinct=True)
-        )
+        queryset = queryset.select_related('video').prefetch_related('tags')
         
         # Pagination
         paginator = Paginator(queryset, page_size)
@@ -288,49 +283,69 @@ class MediaLibraryService:
     
     def get_media_stats(self) -> Dict[str, Any]:
         """Get media library statistics."""
-        from django.db.models import Count, Sum
-        
+        from django.db.models import Count, Sum, Q
+
         # Video stats
         video_stats = Video.objects.filter(tenant=self.tenant).aggregate(
             total=Count('id'),
             total_size=Sum('file_size_bytes')
         )
-        
+
         videos_by_status = dict(
             Video.objects.filter(tenant=self.tenant)
             .values('status')
             .annotate(count=Count('id'))
             .values_list('status', 'count')
         )
-        
+
         # Image stats
         image_stats = Image.objects.filter(tenant=self.tenant).aggregate(
             total=Count('id'),
             total_size=Sum('file_size_bytes')
         )
-        
+
         images_by_status = dict(
             Image.objects.filter(tenant=self.tenant)
             .values('status')
             .annotate(count=Count('id'))
             .values_list('status', 'count')
         )
-        
+
         # Detection stats
         detection_stats = Detection.objects.filter(tenant=self.tenant).aggregate(
             total=Count('id')
         )
-        
+
         detections_by_label = list(
             Detection.objects.filter(tenant=self.tenant)
             .values('label')
             .annotate(count=Count('id'))
             .order_by('-count')[:10]
         )
-        
+
+        # Top labels (same data, frontend-friendly key name)
+        top_labels = [
+            {'label': d['label'], 'count': d['count']}
+            for d in detections_by_label
+        ]
+
+        # Plant breakdown — images grouped by plant_site with detection counts
+        plant_breakdown = list(
+            Image.objects.filter(tenant=self.tenant)
+            .exclude(plant_site='')
+            .values('plant_site')
+            .annotate(
+                total=Count('id'),
+                detections=Count('detections', filter=Q(detections__isnull=False)),
+            )
+            .order_by('-total')[:10]
+        )
+
         # Recent uploads (last 7 days)
-        seven_days_ago = timezone.now() - timedelta(days=7)
-        
+        now = timezone.now()
+        seven_days_ago = now - timedelta(days=7)
+        fourteen_days_ago = now - timedelta(days=14)
+
         recent_uploads = {
             'videos': Video.objects.filter(
                 tenant=self.tenant,
@@ -345,7 +360,28 @@ class MediaLibraryService:
                 created_at__gte=seven_days_ago
             ).count()
         }
-        
+
+        # Previous period uploads (7-14 days ago) for trend calculation
+        previous_uploads = {
+            'images': Image.objects.filter(
+                tenant=self.tenant,
+                created_at__gte=fourteen_days_ago,
+                created_at__lt=seven_days_ago,
+            ).count(),
+            'videos': Video.objects.filter(
+                tenant=self.tenant,
+                created_at__gte=fourteen_days_ago,
+                created_at__lt=seven_days_ago,
+            ).count(),
+        }
+
+        current_media = recent_uploads['images'] + recent_uploads['videos']
+        previous_media = previous_uploads['images'] + previous_uploads['videos']
+        media_trend_pct = (
+            round((current_media - previous_media) / previous_media * 100)
+            if previous_media > 0 else 0
+        )
+
         return {
             'total_videos': video_stats['total'] or 0,
             'total_images': image_stats['total'] or 0,
@@ -354,5 +390,8 @@ class MediaLibraryService:
             'videos_by_status': videos_by_status,
             'images_by_status': images_by_status,
             'detections_by_label': detections_by_label,
-            'recent_uploads': recent_uploads
+            'top_labels': top_labels,
+            'plant_breakdown': plant_breakdown,
+            'recent_uploads': recent_uploads,
+            'media_trend_pct': media_trend_pct,
         }

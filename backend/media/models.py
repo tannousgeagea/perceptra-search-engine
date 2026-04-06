@@ -64,6 +64,18 @@ class TenantScopedModel(models.Model):
         help_text="User who last updated this record"
     )
 
+    # Direct key reference — complements created_by.
+    # Remains populated even after the owning user is deleted,
+    # giving a complete audit trail for machine-originated writes.
+    created_by_api_key = models.ForeignKey(
+        'api_keys.APIKey',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="%(class)s_created",
+        help_text="API key used to create this record, if applicable.",
+    )
+
 
     class Meta:
         abstract = True
@@ -229,6 +241,16 @@ class Video(TenantScopedModel):
         help_text=_('Image format (mp4, avi, mov, webm, etc.)')
     )
 
+    frame_count = models.PositiveIntegerField(
+        default=0,
+        help_text=_('Number of frames extracted from this video'),
+    )
+
+    detection_count = models.PositiveIntegerField(
+        default=0,
+        help_text=_('Total number of detections across all frames of this video'),
+    )
+
     tags = models.ManyToManyField('Tag', through='VideoTag', related_name='videos', blank=True)
 
     class Meta:
@@ -310,11 +332,6 @@ class Video(TenantScopedModel):
             first_frame = self.frames.first() # type: ignore
             return (first_frame.width * first_frame.height) / 1_000_000
         return 0.0
-    
-    @property
-    def frame_count(self) -> int:
-        """Get total number of frames extracted from this video."""
-        return self.frames.count()  #type: ignore
     
     def get_frame_by_timestamp(self, timestamp: float) -> 'Image':
         """Retrieve a frame closest to the given timestamp."""
@@ -415,6 +432,11 @@ class Image(TenantScopedModel):
         null=True,
         blank=True,
         help_text=_('ID of the corresponding point in the vector store'),
+    )
+
+    detection_count = models.PositiveIntegerField(
+        default=0,
+        help_text=_('Number of detections on this image'),
     )
 
     class Meta:
@@ -564,11 +586,32 @@ class Detection(TenantScopedModel):
 
     tags = models.ManyToManyField('Tag', through='DetectionTag', related_name='detections', blank=True)
 
+    # Detection source
+    DETECTION_SOURCE_CHOICES = [
+        ('manual', 'Manual Upload'),
+        ('auto', 'Automatic Detection'),
+    ]
+    source = models.CharField(
+        max_length=20,
+        choices=DETECTION_SOURCE_CHOICES,
+        default='manual',
+        db_index=True,
+        help_text=_('How this detection was created'),
+    )
+    detection_job = models.ForeignKey(
+        'embeddings.DetectionJob',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='detections',
+        help_text=_('The auto-detection job that created this detection'),
+    )
+
     # Vector DB reference
     vector_point_id = models.CharField(max_length=100, unique=True, null=True, blank=True)
     embedding_generated = models.BooleanField(default=False, db_index=True)
     embedding_model_version = models.CharField(max_length=50, null=True, blank=True)
-    
+
     class Meta:
         db_table = 'detections'
         indexes = [
@@ -577,6 +620,13 @@ class Detection(TenantScopedModel):
             models.Index(fields=['image', 'confidence']),
             models.Index(fields=['vector_point_id']),
             models.Index(fields=['created_at']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['image', 'checksum'],
+                name='unique_detection_per_image_checksum',
+                condition=models.Q(checksum__isnull=False),
+            ),
         ]
         ordering = ['-created_at']
         default_manager_name = 'objects'

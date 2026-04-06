@@ -1,0 +1,476 @@
+/* ── WasteVision Control Room Theme ──────────────────────────── */
+/* Extends the existing design system CSS variables. */
+
+.wv-root {
+  --wv-void: #040608;
+  --wv-panel: #08090f;
+  --wv-surface: #0d1018;
+  --wv-border: #131926;
+  --wv-border-bright: #1e293b;
+  --wv-green: #00e676;
+  --wv-green-dim: rgba(0, 230, 118, 0.15);
+  --wv-red: #ff1744;
+  --wv-red-dim: rgba(255, 23, 68, 0.15);
+  --wv-yellow: #ffea00;
+  --wv-yellow-dim: rgba(255, 234, 0, 0.12);
+  --wv-amber: var(--amber, #f5a623);
+  --wv-mono: 'JetBrains Mono', monospace;
+  background: var(--wv-void);
+  font-family: var(--wv-mono);
+  color: var(--text-primary, #e2e8f4);
+  min-height: 100%;
+}
+
+/* ── Scanline overlay ──────────────────────────────────────── */
+.wv-scanlines {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 3px,
+    rgba(0, 230, 118, 0.008) 3px,
+    rgba(0, 230, 118, 0.008) 4px
+  );
+}
+
+/* ── Header bar ────────────────────────────────────────────── */
+.wv-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--wv-border-bright);
+  background: var(--wv-panel);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.wv-header-title {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--wv-green);
+}
+
+.wv-header-meta {
+  font-size: 0.7rem;
+  color: var(--text-secondary, #8b97b5);
+  letter-spacing: 0.08em;
+}
+
+/* ── Tab bar ───────────────────────────────────────────────── */
+.wv-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--wv-border-bright);
+  background: var(--wv-panel);
+  padding: 0 24px;
+}
+
+.wv-tab {
+  padding: 10px 18px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted, #4e5a73);
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  font-family: var(--wv-mono);
+}
+
+.wv-tab:hover {
+  color: var(--text-secondary, #8b97b5);
+}
+
+.wv-tab.active {
+  color: var(--wv-green);
+  border-bottom-color: var(--wv-green);
+}
+
+/* ── Camera grid ───────────────────────────────────────────── */
+.wv-camera-grid {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.wv-camera-grid.grid-2 { grid-template-columns: repeat(2, 1fr); }
+.wv-camera-grid.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.wv-camera-grid.grid-4 { grid-template-columns: repeat(4, 1fr); }
+
+.wv-camera-cell {
+  background: var(--wv-surface);
+  border: 1px solid var(--wv-border);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.2s;
+  aspect-ratio: 16 / 9;
+}
+
+.wv-camera-cell:hover {
+  border-color: var(--wv-border-bright);
+}
+
+.wv-camera-cell.risk-low    { border-color: rgba(0, 230, 118, 0.4); }
+.wv-camera-cell.risk-medium { border-color: rgba(255, 234, 0, 0.4); }
+.wv-camera-cell.risk-high   { border-color: rgba(245, 166, 35, 0.6); }
+.wv-camera-cell.risk-critical {
+  border-color: var(--wv-red);
+  box-shadow: 0 0 12px rgba(255, 23, 68, 0.3);
+  animation: wv-critical-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes wv-critical-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(255, 23, 68, 0.3); }
+  50%       { box-shadow: 0 0 20px rgba(255, 23, 68, 0.6); }
+}
+
+.wv-camera-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  background: rgba(4, 6, 8, 0.85);
+  z-index: 2;
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.wv-camera-name {
+  color: var(--text-secondary, #8b97b5);
+  font-weight: 600;
+}
+
+.wv-camera-frame {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: var(--wv-void);
+}
+
+.wv-camera-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted, #4e5a73);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+}
+
+/* Contamination zone overlay */
+.wv-zone-overlay {
+  position: absolute;
+  pointer-events: none;
+  z-index: 3;
+  border: 2px solid;
+  border-radius: 2px;
+}
+
+.wv-zone-overlay.critical { border-color: var(--wv-red); background: var(--wv-red-dim); }
+.wv-zone-overlay.high     { border-color: var(--wv-amber); background: rgba(245,166,35,0.12); }
+.wv-zone-overlay.medium   { border-color: var(--wv-yellow); background: var(--wv-yellow-dim); }
+.wv-zone-overlay.low      { border-color: var(--wv-green); background: var(--wv-green-dim); }
+
+/* ── Risk badge ────────────────────────────────────────────── */
+.wv-risk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-family: var(--wv-mono);
+}
+
+.wv-risk-badge.low      { background: var(--wv-green-dim);   color: var(--wv-green);  border: 1px solid rgba(0,230,118,0.3); }
+.wv-risk-badge.medium   { background: var(--wv-yellow-dim);  color: var(--wv-yellow); border: 1px solid rgba(255,234,0,0.3); }
+.wv-risk-badge.high     { background: rgba(245,166,35,0.12); color: var(--wv-amber);  border: 1px solid rgba(245,166,35,0.4); }
+.wv-risk-badge.critical { background: var(--wv-red-dim);     color: var(--wv-red);    border: 1px solid rgba(255,23,68,0.4); animation: wv-critical-pulse 1.5s infinite; }
+
+/* ── Composition bars ──────────────────────────────────────── */
+.wv-comp-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.wv-comp-label {
+  width: 72px;
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary, #8b97b5);
+  flex-shrink: 0;
+}
+
+.wv-comp-track {
+  flex: 1;
+  height: 6px;
+  background: var(--wv-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.wv-comp-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.wv-comp-pct {
+  width: 36px;
+  text-align: right;
+  font-size: 0.65rem;
+  color: var(--text-primary, #e2e8f4);
+  flex-shrink: 0;
+}
+
+/* ── Alert feed ─────────────────────────────────────────────── */
+.wv-alert-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--wv-border);
+  font-size: 0.72rem;
+}
+
+.wv-alert-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.wv-alert-row.unread {
+  border-left: 3px solid;
+}
+.wv-alert-row.unread.critical { border-left-color: var(--wv-red); }
+.wv-alert-row.unread.high     { border-left-color: var(--wv-amber); }
+.wv-alert-row.unread.medium   { border-left-color: var(--wv-yellow); }
+.wv-alert-row.unread.low      { border-left-color: var(--wv-green); }
+
+.wv-alert-time {
+  color: var(--text-muted, #4e5a73);
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  padding-top: 2px;
+  flex-shrink: 0;
+  width: 80px;
+}
+
+.wv-alert-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.wv-alert-label {
+  font-weight: 600;
+  color: var(--text-primary, #e2e8f4);
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wv-alert-camera {
+  color: var(--text-muted, #4e5a73);
+  font-size: 0.62rem;
+}
+
+.wv-ack-btn {
+  padding: 3px 8px;
+  font-size: 0.6rem;
+  font-family: var(--wv-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: transparent;
+  border: 1px solid var(--wv-border-bright);
+  color: var(--text-secondary, #8b97b5);
+  border-radius: 3px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.wv-ack-btn:hover {
+  background: var(--wv-green-dim);
+  color: var(--wv-green);
+  border-color: rgba(0, 230, 118, 0.4);
+}
+
+/* ── Data table ─────────────────────────────────────────────── */
+.wv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+}
+
+.wv-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted, #4e5a73);
+  border-bottom: 1px solid var(--wv-border-bright);
+  white-space: nowrap;
+}
+
+.wv-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--wv-border);
+  color: var(--text-primary, #e2e8f4);
+  vertical-align: middle;
+}
+
+.wv-table tr:hover td {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+/* ── Panel ──────────────────────────────────────────────────── */
+.wv-panel {
+  background: var(--wv-panel);
+  border: 1px solid var(--wv-border-bright);
+  border-radius: 4px;
+}
+
+.wv-panel-header {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--wv-border);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-secondary, #8b97b5);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ── Form controls ──────────────────────────────────────────── */
+.wv-input {
+  background: var(--wv-surface);
+  border: 1px solid var(--wv-border-bright);
+  border-radius: 3px;
+  color: var(--text-primary, #e2e8f4);
+  padding: 7px 12px;
+  font-size: 0.78rem;
+  font-family: var(--wv-mono);
+  width: 100%;
+  transition: border-color 0.15s;
+}
+
+.wv-input:focus {
+  outline: none;
+  border-color: var(--wv-green);
+}
+
+.wv-select {
+  background: var(--wv-surface);
+  border: 1px solid var(--wv-border-bright);
+  border-radius: 3px;
+  color: var(--text-primary, #e2e8f4);
+  padding: 7px 10px;
+  font-size: 0.78rem;
+  font-family: var(--wv-mono);
+  cursor: pointer;
+}
+
+.wv-btn {
+  padding: 7px 16px;
+  font-size: 0.7rem;
+  font-family: var(--wv-mono);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border-radius: 3px;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.wv-btn-primary {
+  background: var(--wv-green);
+  color: #000;
+}
+.wv-btn-primary:hover { background: #4dffa0; }
+
+.wv-btn-danger {
+  background: var(--wv-red-dim);
+  color: var(--wv-red);
+  border: 1px solid rgba(255, 23, 68, 0.3);
+}
+.wv-btn-danger:hover { background: rgba(255, 23, 68, 0.25); }
+
+.wv-btn-ghost {
+  background: transparent;
+  color: var(--text-secondary, #8b97b5);
+  border: 1px solid var(--wv-border-bright);
+}
+.wv-btn-ghost:hover { background: rgba(255, 255, 255, 0.04); color: var(--text-primary, #e2e8f4); }
+
+/* ── Live indicator ─────────────────────────────────────────── */
+.wv-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--wv-green);
+  animation: wv-blink 1.2s steps(1) infinite;
+}
+
+@keyframes wv-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* ── Inspector note ─────────────────────────────────────────── */
+.wv-inspector-note {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #8b97b5);
+  font-style: italic;
+  line-height: 1.5;
+  padding: 10px 14px;
+  background: var(--wv-surface);
+  border-left: 3px solid var(--wv-border-bright);
+  border-radius: 0 3px 3px 0;
+  margin: 8px 0;
+}
+
+/* ── Status badge ───────────────────────────────────────────── */
+.wv-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.wv-status.streaming { color: var(--wv-green); }
+.wv-status.idle      { color: var(--text-muted, #4e5a73); }
+.wv-status.error     { color: var(--wv-red); }

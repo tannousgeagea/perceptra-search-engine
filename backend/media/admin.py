@@ -12,6 +12,7 @@ from .models import (
     ImageTag,
     VideoTag,
     DetectionTag,
+    Media,
 )
 
 
@@ -29,6 +30,177 @@ class DetectionTagInline(TabularInline):
     model = DetectionTag
     extra = 1
     autocomplete_fields = ("tag", "tagged_by")
+
+
+
+@admin.register(Media)
+class MediaAdmin(ModelAdmin):
+    save_on_top = True
+    list_per_page = 50
+
+    autocomplete_fields = ("tenant", "created_by", "updated_by")
+
+    list_display = (
+        "filename",
+        "tenant",
+        "media_type_badge",
+        "storage_backend",
+        "file_size_display",
+        "status_badge",
+        "is_deleted",
+        "created_at",
+        "download_link",
+    )
+
+    list_filter = (
+        "tenant",
+        "media_type",
+        "storage_backend",
+        "status",
+        "is_deleted",
+        "created_at",
+    )
+
+    search_fields = (
+        "filename",
+        "storage_key",
+        "checksum",
+        "tenant__name",
+    )
+
+    ordering = ("-created_at",)
+
+    readonly_fields = (
+        "id",
+        "media_id",
+        "file_size_display",
+        "download_link",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+    )
+
+    fieldsets = (
+        ("Identity", {
+            "fields": (
+                "tenant",
+                "media_type",
+                "filename",
+                "file_format",
+                "content_type",
+            )
+        }),
+        ("Storage", {
+            "fields": (
+                "storage_backend",
+                "storage_key",
+                "file_size_bytes",
+                "file_size_display",
+            )
+        }),
+        ("Integrity", {
+            "fields": ("checksum",)
+        }),
+        ("Status", {
+            "fields": (
+                "status",
+                "is_deleted",
+                "deleted_at",
+            )
+        }),
+        ("Metadata", {
+            "fields": (
+                "id",
+                "media_id",
+                "created_by",
+                "updated_by",
+                "created_at",
+                "updated_at",
+            )
+        }),
+        ("Actions", {
+            "fields": ("download_link",)
+        }),
+    )
+
+    # ─────────────────────────────────────────────
+    # Display helpers
+    # ─────────────────────────────────────────────
+
+    @admin.display(description="Type")
+    def media_type_badge(self, obj):
+        colors = {
+            "video": "#6366F1",
+            "image": "#10B981",
+            "detection": "#F59E0B",
+        }
+        color = colors.get(obj.media_type, "#64748B")
+
+        return format_html(
+            '<span style="padding:4px 10px;border-radius:999px;'
+            'background:{};color:white;font-size:12px;">{}</span>',
+            color,
+            obj.get_media_type_display(),
+        )
+
+    @admin.display(description="Size")
+    def file_size_display(self, obj):
+        return f"{obj.file_size_mb:.2f} MB"
+
+    @admin.display(description="Status")
+    def status_badge(self, obj):
+        colors = {
+            "uploaded": "#64748B",
+            "processing": "#F59E0B",
+            "completed": "#10B981",
+            "failed": "#EF4444",
+        }
+
+        color = colors.get(obj.status, "#64748B")
+
+        return format_html(
+            '<span style="padding:4px 10px;border-radius:999px;'
+            'background:{};color:white;font-size:12px;">{}</span>',
+            color,
+            obj.get_status_display(),
+        )
+
+    @admin.display(description="Download")
+    def download_link(self, obj):
+        try:
+            url = obj.get_download_url()
+            return format_html(
+                '<a href="{}" target="_blank" '
+                'style="padding:4px 10px;background:#3B82F6;color:white;'
+                'border-radius:6px;text-decoration:none;">Download</a>',
+                url,
+            )
+        except Exception:
+            return "—"
+
+    # ─────────────────────────────────────────────
+    # Admin actions
+    # ─────────────────────────────────────────────
+
+    actions = (
+        "soft_delete_media",
+        "restore_media",
+    )
+
+    @admin.action(description="Soft delete selected media")
+    def soft_delete_media(self, request, queryset):
+        updated = 0
+        for media in queryset:
+            if not media.is_deleted:
+                media.soft_delete()
+                updated += 1
+        self.message_user(request, f"{updated} media items soft deleted.")
+
+    @admin.action(description="Restore soft-deleted media")
+    def restore_media(self, request, queryset):
+        updated = queryset.update(is_deleted=False, deleted_at=None)
+        self.message_user(request, f"{updated} media items restored.")
+
 
 # ----------------------------------
 # Video Admin
@@ -113,6 +285,15 @@ class VideoAdmin(ModelAdmin):
             "fields": ("created_by", "updated_by", "created_at", "updated_at")
         }),
     )
+
+    # ---------- QUERYSET ----------
+
+    def get_queryset(self, request):
+        from django.db.models import Count
+        return (
+            super()
+            .get_queryset(request)
+        )
 
     # ---------- DISPLAY HELPERS ----------
 
