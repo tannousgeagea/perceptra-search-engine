@@ -3,11 +3,13 @@
 from celery import shared_task
 from embeddings.tasks.base import EmbeddingTask, get_active_model_version, get_or_create_collection
 from media.models import Detection, Image
+from embeddings.models import TenantVectorCollection
 from infrastructure.storage.client import get_storage_manager
 from infrastructure.embeddings.generator import EmbeddingGenerator
 from infrastructure.vectordb.base import VectorPoint
 from PIL import Image as PILImage
 
+from django.db.models import F
 from django.conf import settings
 import io
 import numpy as np
@@ -17,8 +19,8 @@ import time
 logger = logging.getLogger(__name__)
 
 
-@shared_task(base=EmbeddingTask, name='embeddings.process_detection')
-async def process_detection_task(detection_id: int):
+@shared_task(base=EmbeddingTask, name='embedding:process_detection', queue='embedding')
+def process_detection_task(detection_id: int):
     """
     Process detection: crop region, generate embedding, store in vector DB.
     
@@ -48,15 +50,13 @@ async def process_detection_task(detection_id: int):
         storage = get_storage_manager(backend=detection.image.storage_backend)
         
         # TODO: Download parent image from storage
-        image_bytes = await storage.download(detection.image.storage_key)
-        
-        # Download parent image
         logger.debug(f"Downloading image from: {detection.image.storage_key}")
-
+        image_bytes = storage.download_sync(detection.image.storage_key)
 
         # Load image
         image = PILImage.open(io.BytesIO(image_bytes)).convert('RGB')
-        image_array = np.array(image)
+        arr = np.array(image)
+
         # Crop detection region
         if detection.bbox_format == 'normalized':
             # Convert normalized to absolute
@@ -65,11 +65,8 @@ async def process_detection_task(detection_id: int):
             w = int(detection.bbox_width * detection.image.width)
             h = int(detection.bbox_height * detection.image.height)
         else:
-            # Already absolute
-            x = int(detection.bbox_x)
-            y = int(detection.bbox_y)
-            w = int(detection.bbox_width)
-            h = int(detection.bbox_height)
+            x, y = int(detection.bbox_x), int(detection.bbox_y)
+            w, h = int(detection.bbox_width), int(detection.bbox_height)
         
         # Ensure bounds are valid
         x = max(0, min(x, detection.image.width))
@@ -77,46 +74,51 @@ async def process_detection_task(detection_id: int):
         w = max(1, min(w, detection.image.width - x))
         h = max(1, min(h, detection.image.height - y))
         
-        # Crop
-        cropped_array = image_array[y:y+h, x:x+w]
-        cropped_image = PILImage.fromarray(cropped_array)
-        
+        cropped = PILImage.fromarray(arr[y:y+h, x:x+w])
         logger.debug(f"Cropped detection region: {w}x{h}")
-        
-        # Optionally save cropped image
-        if detection.storage_key:
-            # Save crop to storage
-            crop_buffer = io.BytesIO()
-            cropped_image.save(crop_buffer, format='JPEG', quality=95)
-            crop_bytes = crop_buffer.getvalue()
-            
-            # Upload to storage
-            # await storage.save(detection.storage_key, crop_bytes)
-            logger.debug(f"Saved crop to: {detection.storage_key}")
-        
-        # Generate embedding
-        task = process_detection_task
-        embedding_gen = task.embedding_generator
-        
-        # Get model config
+
         model_config = model_version.config or {}
         model_type = model_config.get('type', 'clip')
-        model_variant = model_config.get('variant', 'ViT-B-32')
-        
-        model = embedding_gen.get_model(    # type: ignore
+        embedding_gen = process_detection_task.embedding_generator  # type: ignore
+        model = embedding_gen.get_model(
             model_type=model_type,
-            model_variant=model_variant,
-            device=getattr(settings, 'EMBEDDING_DEVICE', 'cuda')
+            model_variant=model_config.get('variant', 'ViT-B-32'),
+            device=getattr(settings, 'EMBEDDING_DEVICE', 'cuda'),
         )
-        
-        start_time = time.time()
-        embedding_vector = model.encode_image(cropped_image)
-        inference_time = (time.time() - start_time) * 1000
-        
-        logger.info(f"Detection embedding generated in {inference_time:.2f}ms")
+
+        t0 = time.time()
+
+        # Context-aware embedding: use SAM3 ROI + halo when available
+        context_aware = False
+        if model_type == 'sam3' and hasattr(model, 'encode_detection_with_context'):
+            try:
+                # Build normalized bbox for SAM3's ROI method
+                norm_bbox = (
+                    detection.bbox_x if detection.bbox_format == 'normalized' else detection.bbox_x / detection.image.width,
+                    detection.bbox_y if detection.bbox_format == 'normalized' else detection.bbox_y / detection.image.height,
+                    detection.bbox_width if detection.bbox_format == 'normalized' else detection.bbox_width / detection.image.width,
+                    detection.bbox_height if detection.bbox_format == 'normalized' else detection.bbox_height / detection.image.height,
+                )
+                # Encode with full parent image context (single forward pass)
+                embedding_vector = model.encode_detection_with_context(
+                    image=image,  # full PIL image, not the crop
+                    bbox=norm_bbox,
+                    halo_ratio=0.5,
+                    roi_weight=0.7,
+                )
+                context_aware = True
+                logger.info(f"Context-aware SAM3 ROI+halo embedding for detection {detection_id}")
+            except Exception as e:
+                logger.warning(f"Context-aware encoding failed, falling back to crop: {e}")
+                embedding_vector = model.encode_image(cropped)
+        else:
+            embedding_vector = model.encode_image(cropped)
+
+        inference_ms = (time.time() - t0) * 1000
+        logger.info(f"Detection embedding generated in {inference_ms:.2f}ms (context_aware={context_aware})")
         
         # Generate unique vector point ID
-        vector_point_id = f"det_{detection.detection_id}"
+        vector_point_id = str(detection.detection_id)
         
         # Prepare payload metadata
         payload = {
@@ -139,6 +141,7 @@ async def process_detection_task(detection_id: int):
             'image_uuid': str(detection.image.image_id),
             'image_filename': detection.image.filename,
             'image_storage_key': detection.image.storage_key,
+            'image_storage_backend': detection.image.storage_backend,
             
             # Context metadata
             'plant_site': detection.image.plant_site,
@@ -156,29 +159,27 @@ async def process_detection_task(detection_id: int):
             'model_version': model_version.name,
             
             # Tags
-            'tags': list(detection.tags.values_list('name', flat=True))
+            'tags': list(detection.tags.values_list('name', flat=True)),
+
+            # Embedding context
+            'context_aware': context_aware,
         }
         
         # Get vector DB client
-        vector_db = task.get_vector_db_client(     #type: ignore
+        vector_db = process_detection_task.get_vector_db_client(     #type: ignore
             collection_name=collection.collection_name,
             dimension=model_version.vector_dimension
         )
         
         # Insert into vector DB
-        vector_point = VectorPoint(
-            id=vector_point_id,
-            vector=embedding_vector,
-            payload=payload
-        )
-        
-        vector_db.upsert([vector_point])
-        
+        vector_db.upsert([VectorPoint(id=vector_point_id, vector=embedding_vector, payload=payload)])
         logger.info(f"Detection vector stored: {vector_point_id}")
-        
+                
         # Update collection stats
-        collection.total_vectors += 1
-        collection.save(update_fields=['total_vectors', 'updated_at'])
+        # With a single atomic UPDATE — no read-modify-write in application memory:
+        TenantVectorCollection.objects.filter(pk=collection.pk).update(
+            total_vectors=F('total_vectors') + 1
+        )
         
         # Update detection record
         detection.vector_point_id = vector_point_id
@@ -198,7 +199,7 @@ async def process_detection_task(detection_id: int):
             'detection_id': detection_id,
             'vector_point_id': vector_point_id,
             'label': detection.label,
-            'inference_time_ms': inference_time
+            'inference_time_ms': inference_ms
         }
         
     except Detection.DoesNotExist:

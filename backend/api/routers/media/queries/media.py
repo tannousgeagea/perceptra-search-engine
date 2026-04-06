@@ -1,8 +1,10 @@
 # api/routers/media.py
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
+from fastapi.responses import StreamingResponse
 from typing import Annotated, List, Optional
 from django.db.models import Count
+from django.conf import settings
 from tenants.context import RequestContext
 from media.models import Video, Image, Detection, Tag
 from media.services import MediaLibraryService
@@ -22,26 +24,107 @@ from api.routers.media.schemas import (
 from infrastructure.storage.client import get_storage_manager
 from asgiref.sync import sync_to_async
 import logging
+import mimetypes
+import re
+from pathlib import Path
 
 router = APIRouter(prefix="/media", tags=["Media Library"])
 logger = logging.getLogger(__name__)
 
 
+def _media_url(storage_backend: str, storage_key: str) -> str:
+    """Return a browser-accessible URL for a stored file.
+
+    Cloud backends (Azure, S3, MinIO) already return HTTP presigned URLs.
+    Local storage returns a file:// URI which browsers cannot load, so we
+    return a relative path to the built-in file-serve endpoint instead.
+    """
+    if storage_backend == "local":
+        # URL-encode forward slashes are kept — storage_key is path-safe
+        return f"/api/v1/media/files/{storage_key}"
+    return ""  # caller will call get_download_url for cloud backends
+
+
+@router.get("/files/{storage_key:path}", include_in_schema=False)
+async def serve_local_file(request: Request, storage_key: str):
+    """Stream a file from local storage with HTTP range request support.
+
+    Range support is required for HTML5 video seeking (browsers send
+    'Range: bytes=N-M' when the user scrubs the timeline).
+    """
+    storage_path = getattr(settings, "STORAGE_PATH", "/media/search-engine/")
+    full_path = Path(storage_path) / storage_key
+
+    if not full_path.exists() or not full_path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    content_type, _ = mimetypes.guess_type(str(full_path))
+    content_type = content_type or "application/octet-stream"
+    file_size = full_path.stat().st_size
+
+    range_header = request.headers.get("Range")
+    if range_header:
+        m = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else file_size - 1
+            end = min(end, file_size - 1)
+            length = end - start + 1
+
+            def iter_range():
+                with open(full_path, "rb") as f:
+                    f.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(65536, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        yield chunk
+
+            return StreamingResponse(
+                iter_range(),
+                status_code=206,
+                media_type=content_type,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(length),
+                },
+            )
+
+    def iter_file():
+        with open(full_path, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        iter_file(),
+        media_type=content_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        },
+    )
+
+
 async def build_video_response(video: Video) -> VideoResponse:
     """Build video response with download URL."""
-    # Get download URL
-    storage = get_storage_manager(backend=video.storage_backend)
-    download_url = await storage.get_download_url(video.storage_key)
-    
-    # Get tags
+    backend = video.storage_backend
+    if backend == "local":
+        download_url = _media_url(backend, video.storage_key)
+    else:
+        storage = get_storage_manager(backend=backend)
+        download_url = await storage.get_download_url(video.storage_key)
+
     tags = await sync_to_async(list)(video.tags.all())
-    
+
     return VideoResponse(
         id=video.id,  #type: ignore
         video_id=video.video_id,
         filename=video.filename,
         storage_key=video.storage_key,
-        storage_backend=video.storage_backend,
+        storage_backend=backend,
         file_size_bytes=video.file_size_bytes,
         duration_seconds=video.duration_seconds,
         plant_site=video.plant_site,
@@ -51,28 +134,30 @@ async def build_video_response(video: Video) -> VideoResponse:
         status=video.status,
         frame_count=video.frame_count,
         detection_count=video.detection_count,    #type: ignore
-        tags=[TagResponse.model_validate(tag) for tag in tags],
+        tags=[TagResponse(id=t.id, name=t.name, description=t.description, color=t.color) for t in tags],
         created_at=video.created_at,
         updated_at=video.updated_at,
-        download_url=download_url
+        download_url=download_url,
     )
 
 
 async def build_image_response(image: Image) -> ImageResponse:
     """Build image response with download URLs."""
-    # Get download URL
-    storage = get_storage_manager(backend=image.storage_backend)
-    download_url = await storage.get_download_url(image.storage_key)
-    
-    # Get tags
+    backend = image.storage_backend
+    if backend == "local":
+        download_url = _media_url(backend, image.storage_key)
+    else:
+        storage = get_storage_manager(backend=backend)
+        download_url = await storage.get_download_url(image.storage_key)
+
     tags = await sync_to_async(list)(image.tags.all())
-    
+
     return ImageResponse(
         id=image.id,   # type: ignore
         image_id=image.image_id,
         filename=image.filename,
         storage_key=image.storage_key,
-        storage_backend=image.storage_backend,
+        storage_backend=backend,
         file_size_bytes=image.file_size_bytes,
         width=image.width,
         height=image.height,
@@ -87,24 +172,31 @@ async def build_image_response(image: Image) -> ImageResponse:
         status=image.status,
         checksum=image.checksum,
         detection_count=image.detection_count,    #type: ignore
-        tags=[TagResponse.model_validate(tag) for tag in tags],
+        tags=[TagResponse(id=t.id, name=t.name, description=t.description, color=t.color) for t in tags],
         created_at=image.created_at,
         updated_at=image.updated_at,
         download_url=download_url,
-        thumbnail_url=download_url  # TODO: Generate actual thumbnails
+        thumbnail_url=download_url,
     )
 
 
 async def build_detection_response(detection: Detection) -> DetectionResponse:
     """Build detection response with URLs."""
-    # Get image URL
-    storage = get_storage_manager(backend=detection.image.storage_backend)
-    image_url = await storage.get_download_url(detection.image.storage_key)
+    img_backend = detection.image.storage_backend
+    if img_backend == "local":
+        image_url = _media_url(img_backend, detection.image.storage_key)
+    else:
+        storage = get_storage_manager(backend=img_backend)
+        image_url = await storage.get_download_url(detection.image.storage_key)
     
     # Get crop URL if available
     crop_url = None
     if detection.storage_key:
-        crop_url = await storage.get_download_url(detection.storage_key)
+        if img_backend == "local":
+            crop_url = _media_url(img_backend, detection.storage_key)
+        else:
+            storage = get_storage_manager(backend=img_backend)
+            crop_url = await storage.get_download_url(detection.storage_key)
     
     # Get tags
     tags = await sync_to_async(list)(detection.tags.all())
@@ -132,7 +224,7 @@ async def build_detection_response(detection: Detection) -> DetectionResponse:
         video_uuid=detection.image.video.video_id if detection.image.video else None,
         embedding_generated=detection.embedding_generated,
         embedding_model_version=detection.embedding_model_version,
-        tags=[TagResponse.model_validate(tag) for tag in tags],
+        tags=[TagResponse(id=t.id, name=t.name, description=t.description, color=t.color) for t in tags],
         created_at=detection.created_at,
         updated_at=detection.updated_at,
         image_url=image_url,
@@ -169,8 +261,10 @@ async def list_videos(
     # Build responses
     video_responses = []
     for video in videos:
-        video_response = await build_video_response(video)
-        video_responses.append(video_response)
+        try:
+            video_responses.append(await build_video_response(video))
+        except Exception as exc:
+            logger.error("Failed to build video response for id=%s: %s", video.id, exc)
     
     return VideoListResponse(
         items=video_responses,
@@ -209,8 +303,10 @@ async def list_images(
     # Build responses
     image_responses = []
     for image in images:
-        image_response = await build_image_response(image)
-        image_responses.append(image_response)
+        try:
+            image_responses.append(await build_image_response(image))
+        except Exception as exc:
+            logger.error("Failed to build image response for id=%s: %s", image.id, exc)
     
     return ImageListResponse(
         items=image_responses,
@@ -249,8 +345,10 @@ async def list_detections(
     # Build responses
     detection_responses = []
     for detection in detections:
-        detection_response = await build_detection_response(detection)
-        detection_responses.append(detection_response)
+        try:
+            detection_responses.append(await build_detection_response(detection))
+        except Exception as exc:
+            logger.error("Failed to build detection response for id=%s: %s", detection.id, exc)
     
     return DetectionListResponse(
         items=detection_responses,
@@ -278,13 +376,18 @@ async def list_tags(
     
     tag_responses = []
     for tag in tags:
-        tag_response = TagResponse.model_validate(tag)
-        tag_response.usage_count = {
-            'images': tag.image_count,         # type: ignore
-            'videos': tag.video_count,         # type: ignore
-            'detections': tag.detection_count, # type: ignore
-            'total': tag.image_count + tag.video_count + tag.detection_count,  # type: ignore
-        }
+        tag_response = TagResponse(
+            id=tag.id,
+            name=tag.name,
+            description=tag.description,
+            color=tag.color,
+            usage_count={
+                'images': tag.image_count,         # type: ignore
+                'videos': tag.video_count,         # type: ignore
+                'detections': tag.detection_count, # type: ignore
+                'total': tag.image_count + tag.video_count + tag.detection_count,  # type: ignore
+            },
+        )
         tag_responses.append(tag_response)
     
     return tag_responses

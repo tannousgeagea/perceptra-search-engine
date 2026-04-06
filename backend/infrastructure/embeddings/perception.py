@@ -105,9 +105,19 @@ class PerceptionEncoder(BaseEmbeddingModel):
             
             self.model.to(self.device)
             self.model.eval()
-            
+
+            # Verify embedding dimension
+            if hasattr(self.model, 'visual') and hasattr(self.model.visual, 'output_dim'):
+                actual_dim = self.model.visual.output_dim
+                if actual_dim != self._embedding_dim:
+                    logger.warning(
+                        f"Perception dimension mismatch: config says {self._embedding_dim}, "
+                        f"model outputs {actual_dim}. Updating."
+                    )
+                    self._embedding_dim = actual_dim
+
             self._is_loaded = True
-            
+
             logger.info(
                 f"Perception Encoder loaded successfully "
                 f"({self._embedding_dim}-d embeddings)"

@@ -236,6 +236,15 @@ class DetectionListResponse(BaseModel):
     filters_applied: dict
 
 
+class LabelCount(BaseModel):
+    label: str
+    count: int
+
+class PlantBreakdown(BaseModel):
+    plant_site: str
+    total: int
+    detections: int
+
 class MediaStatsResponse(BaseModel):
     """Media library statistics."""
     total_videos: int
@@ -245,4 +254,59 @@ class MediaStatsResponse(BaseModel):
     videos_by_status: dict
     images_by_status: dict
     detections_by_label: List[dict]
+    top_labels: List[LabelCount] = []
+    plant_breakdown: List[PlantBreakdown] = []
     recent_uploads: dict
+    media_trend_pct: int = 0
+
+
+
+# ---------------------------------------------------------------------------
+# Schemas Media Ledger
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Bulk Operations
+# ---------------------------------------------------------------------------
+
+class BulkDeleteRequest(BaseModel):
+    ids: List[int] = Field(..., min_length=1, max_length=500)
+
+class BulkDeleteResponse(BaseModel):
+    deleted: int
+    failed: int = 0
+
+class BulkTagRequest(BaseModel):
+    ids: List[int] = Field(..., min_length=1, max_length=500)
+    tag_names: List[str] = Field(..., min_length=1)
+    action: Literal['add', 'remove']
+
+class BulkTagResponse(BaseModel):
+    updated: int
+    tags: List[str]
+
+
+class MediaLedgerItem(BaseModel):
+    id: int
+    media_id: str
+    media_type: str
+    storage_backend: str
+    storage_key: str
+    filename: str
+    file_size_bytes: int
+    file_size_mb: float
+    content_type: str
+    file_format: str
+    checksum: Optional[str]
+    status: str
+    is_deleted: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MediaLedgerListResponse(BaseModel):
+    items: List[MediaLedgerItem]
+    pagination: dict
+    filters_applied: dict

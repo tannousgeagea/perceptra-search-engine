@@ -12,8 +12,7 @@ from qdrant_client.models import (
     MatchValue,
     MatchAny,
     Range,
-    SearchRequest,
-    ScrollRequest,
+    PointIdsList,
 )
 from infrastructure.vectordb.base import (
     BaseVectorDB,
@@ -322,17 +321,17 @@ class QdrantVectorDB(BaseVectorDB):
             # Build filter
             qdrant_filter = self._build_filter(filters) if filters else None
             
-            # Search
-            results = self._client.search(
+            # Search (query_points replaced client.search in qdrant-client >= 1.7)
+            response = self._client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_list,
+                query=query_list,
                 limit=limit,
                 query_filter=qdrant_filter,
                 score_threshold=score_threshold,
                 with_vectors=return_vectors,
                 with_payload=True
             )
-            
+
             # Convert to SearchResult
             search_results = [
                 SearchResult(
@@ -341,7 +340,7 @@ class QdrantVectorDB(BaseVectorDB):
                     payload=result.payload or {},
                     vector=np.array(result.vector) if return_vectors and result.vector else None
                 )
-                for result in results
+                for result in response.points
             ]
             
             elapsed = (time.time() - start_time) * 1000
@@ -371,22 +370,21 @@ class QdrantVectorDB(BaseVectorDB):
         for key, value in filters.items():
             if isinstance(value, dict):
                 # Handle operators
+                range_kwargs = {}
                 if '$gte' in value:
+                    range_kwargs['gte'] = value['$gte']
+                if '$lte' in value:
+                    range_kwargs['lte'] = value['$lte']
+                if '$gt' in value:
+                    range_kwargs['gt'] = value['$gt']
+                if '$lt' in value:
+                    range_kwargs['lt'] = value['$lt']
+
+                if range_kwargs:
                     must_conditions.append(
-                        FieldCondition(key=key, range=Range(gte=value['$gte']))
+                        FieldCondition(key=key, range=Range(**range_kwargs))
                     )
-                elif '$lte' in value:
-                    must_conditions.append(
-                        FieldCondition(key=key, range=Range(lte=value['$lte']))
-                    )
-                elif '$gt' in value:
-                    must_conditions.append(
-                        FieldCondition(key=key, range=Range(gt=value['$gt']))
-                    )
-                elif '$lt' in value:
-                    must_conditions.append(
-                        FieldCondition(key=key, range=Range(lt=value['$lt']))
-                    )
+
                 elif '$in' in value:
                     must_conditions.append(
                         FieldCondition(key=key, match=MatchAny(any=value['$in']))
@@ -446,7 +444,7 @@ class QdrantVectorDB(BaseVectorDB):
         try:
             self._client.delete(
                 collection_name=self.collection_name,
-                points_selector=point_ids,
+                points_selector=PointIdsList(points=point_ids),
                 wait=True
             )
             

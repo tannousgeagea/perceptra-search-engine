@@ -17,6 +17,7 @@ from infrastructure.embeddings.base import (
     ModelLoadError,
     EncodingError
 )
+
 import time
 import logging
 
@@ -147,10 +148,24 @@ class DINOv2Embedding(BaseEmbeddingModel):
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
 
+            # Verify embedding dimension with a dummy forward pass
+            with torch.no_grad():
+                dummy = torch.zeros(1, 3, self.image_size, self.image_size, device=self.device_obj)
+                actual_dim = self.model(dummy).shape[-1]
+            if actual_dim != self._embedding_dim:
+                logger.warning(
+                    f"DINOv2 dimension mismatch: config says {self._embedding_dim}, "
+                    f"model outputs {actual_dim}. Updating."
+                )
+                self._embedding_dim = actual_dim
+
             self._is_loaded = True
-            
-            logger.info(f"DINOv2 model loaded successfully: {self.model_name}")
-            
+
+            logger.info(
+                f"DINOv2 model loaded successfully: {self.model_name} "
+                f"({self._embedding_dim}-d embeddings)"
+            )
+
         except Exception as e:
             logger.error(f"Failed to load DINOv2 model: {str(e)}")
             raise ModelLoadError(f"DINOv2 load failed: {str(e)}")
@@ -163,12 +178,14 @@ class DINOv2Embedding(BaseEmbeddingModel):
         start_time = time.time()
         
         try:
-            # Convert to PIL Image
+            # Convert to PIL Image (RGB)
             if isinstance(image, bytes):
                 image = self._bytes_to_image(image)
             elif isinstance(image, np.ndarray):
                 image = Image.fromarray(image)
-            
+            if isinstance(image, Image.Image):
+                image = image.convert('RGB')
+
             # Preprocess
             image_tensor = self.preprocessor(image).unsqueeze(0).to(self.device_obj)
             
@@ -193,37 +210,46 @@ class DINOv2Embedding(BaseEmbeddingModel):
         """DINOv2 does not support text encoding."""
         raise NotImplementedError("DINOv2 is a vision-only model and does not support text encoding")
     
+    MAX_BATCH_SIZE = 32
+
+    def _encode_images_chunk(self, pil_images: list) -> list:
+        """Encode a single chunk of PIL images."""
+        image_tensors = torch.stack([
+            self.preprocessor(img) for img in pil_images
+        ]).to(self.device_obj)
+
+        with torch.no_grad():
+            features = self.model(image_tensors)
+
+        embeddings = self._to_numpy(features)
+        return [self._normalize_embedding(emb) for emb in embeddings]
+
     def encode_images_batch(self, images: List[Union[bytes, Image.Image, np.ndarray]]) -> List[np.ndarray]:
-        """Encode multiple images in batch."""
+        """Encode multiple images in batch, automatically chunked to avoid OOM."""
         if not self._is_loaded:
             self.load()
-        
+
         try:
-            # Convert all to PIL Images
             pil_images = []
             for img in images:
                 if isinstance(img, bytes):
-                    pil_images.append(self._bytes_to_image(img))
+                    pil_images.append(self._bytes_to_image(img).convert('RGB'))
                 elif isinstance(img, np.ndarray):
-                    pil_images.append(Image.fromarray(img))
+                    pil_images.append(Image.fromarray(img).convert('RGB'))
+                elif isinstance(img, Image.Image):
+                    pil_images.append(img.convert('RGB'))
                 else:
                     pil_images.append(img)
-            
-            # Preprocess batch
-            image_tensors = torch.stack([
-                self.preprocessor(img) for img in pil_images
-            ]).to(self.device_obj)
-            
-            # Encode batch
-            with torch.no_grad():
-                features = self.model(image_tensors)
-            
-            # Convert to numpy and normalize
-            embeddings = self._to_numpy(features)
-            embeddings = np.array([self._normalize_embedding(emb) for emb in embeddings])
-            
-            return list(embeddings)
-            
+
+            if len(pil_images) <= self.MAX_BATCH_SIZE:
+                return self._encode_images_chunk(pil_images)
+
+            results: list = []
+            for i in range(0, len(pil_images), self.MAX_BATCH_SIZE):
+                chunk = pil_images[i:i + self.MAX_BATCH_SIZE]
+                results.extend(self._encode_images_chunk(chunk))
+            return results
+
         except Exception as e:
             logger.error(f"DINOv2 batch encoding failed: {str(e)}")
             raise EncodingError(f"DINOv2 batch encoding failed: {str(e)}")
@@ -322,3 +348,4 @@ class DINOv2Embedding(BaseEmbeddingModel):
         similarity = np.dot(emb1, emb2.T)
         
         return similarity
+    

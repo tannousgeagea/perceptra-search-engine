@@ -6,6 +6,8 @@ from typing import Optional
 from django.db import models
 from django.utils import timezone
 from tenants.models import Tenant
+from django.db.models import F
+from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
 import uuid
 
@@ -106,6 +108,18 @@ class APIKey(models.Model):
         null=True,
         related_name='created_api_keys'
     )
+
+    # Who the key acts on behalf of — the actual user being represented.
+    # Null means the key acts as the admin who created it.
+    owned_by = models.ForeignKey(
+        'users.CustomUser',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='owned_api_keys',
+        help_text='User this key acts on behalf of. Null = key owner is the creator.',
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -193,11 +207,14 @@ class APIKey(models.Model):
         
         return True
     
-    def record_usage(self, ip_address: Optional[str] = None):
-        """Record API key usage."""
-        self.last_used_at = timezone.now()
-        self.total_requests += 1
-        self.save(update_fields=['last_used_at', 'total_requests', 'updated_at'])
+    def record_usage(self, ip_address=None):
+        """Record API key usage. Called via sync_to_async from async context."""
+        # F() expression issues a single atomic UPDATE — no race condition
+        # when multiple workers hit the same key concurrently.
+        APIKey.objects.filter(pk=self.pk).update(
+            last_used_at=timezone.now(),
+            total_requests=F('total_requests') + 1,
+        )
     
     def has_permission(self, required_permission: str) -> bool:
         """Check if key has required permission level."""
@@ -223,6 +240,35 @@ class APIKey(models.Model):
         if not self.allowed_ips:  # Empty = allow all
             return True
         return ip_address in self.allowed_ips
+
+    def clean(self):
+        if self.owned_by and self.owned_by != self.created_by:
+            # Resolve the owned_by user's role in this tenant
+            from tenants.models import TenantMembership
+            try:
+                membership = TenantMembership.objects.get(
+                    user=self.owned_by,
+                    tenant=self.tenant,
+                    is_active=True,
+                )
+            except TenantMembership.DoesNotExist:
+                raise ValidationError(
+                    'owned_by user is not an active member of this tenant.'
+                )
+
+            role_to_permission = {
+                'viewer': 'read',
+                'operator': 'write',
+                'admin': 'admin',
+            }
+            max_allowed = role_to_permission.get(membership.role, 'read')
+
+            permission_rank = {'read': 1, 'write': 2, 'admin': 3}
+            if permission_rank[self.permissions] > permission_rank[max_allowed]:
+                raise ValidationError(
+                    f"Cannot grant '{self.permissions}' permission to a user "
+                    f"whose role only allows '{max_allowed}'."
+                )
 
 
 class APIKeyUsageLog(models.Model):

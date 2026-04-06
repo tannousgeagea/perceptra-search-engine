@@ -8,6 +8,8 @@ from .models import (
     ModelVersion,
     TenantVectorCollection,
     EmbeddingJob,
+    TenantHazardConfig,
+    DetectionJob,
 )
 
 
@@ -160,7 +162,7 @@ class TenantVectorCollectionAdmin(ModelAdmin):
 
     fieldsets = (
         ("Identity", {
-            "fields": ("tenant", "model_version", "collection_name", "db_type"),
+            "fields": ("tenant", "model_version", "collection_name", "db_type", "purpose"),
         }),
         ("State", {
             "fields": ("is_active", "is_searchable"),
@@ -326,3 +328,154 @@ class EmbeddingJobAdmin(ModelAdmin):
     def mark_cancelled(self, request, queryset):
         updated = queryset.update(status="cancelled")
         self.message_user(request, f"Cancelled {updated} job(s).")
+
+
+# ─────────────────────────────────────────────────────────────
+# TenantHazardConfig
+# ─────────────────────────────────────────────────────────────
+
+@admin.register(TenantHazardConfig)
+class TenantHazardConfigAdmin(ModelAdmin):
+    save_on_top = True
+    list_per_page = 50
+
+    list_display = (
+        "name",
+        "tenant",
+        "backend_badge",
+        "prompts_preview",
+        "confidence_threshold",
+        "active_badge",
+        "default_badge",
+        "updated_at",
+    )
+    list_filter = ("is_active", "is_default", "detection_backend", "tenant")
+    search_fields = ("name", "tenant__name")
+    ordering = ("tenant__name", "-updated_at")
+
+    readonly_fields = ("created_at", "updated_at")
+
+    fieldsets = (
+        ("Identity", {
+            "fields": ("tenant", "name"),
+        }),
+        ("Detection Settings", {
+            "fields": ("prompts", "detection_backend", "confidence_threshold", "config"),
+            "description": (
+                "Prompts: JSON list of text prompts (hazard class names). "
+                "Example: [\"metallic pipe\", \"rust\", \"container\"]"
+            ),
+        }),
+        ("Status", {
+            "fields": ("is_active", "is_default"),
+        }),
+        ("Metadata", {
+            "fields": ("created_at", "updated_at"),
+        }),
+    )
+
+    @admin.display(description="Backend")
+    def backend_badge(self, obj: TenantHazardConfig):
+        return pill(obj.get_detection_backend_display(), "#F59E0B")   # type: ignore
+
+    @admin.display(description="Prompts")
+    def prompts_preview(self, obj: TenantHazardConfig):
+        if not obj.prompts:
+            return "—"
+        preview = ", ".join(obj.prompts[:3])
+        if len(obj.prompts) > 3:
+            preview += f" (+{len(obj.prompts) - 3} more)"
+        return preview
+
+    @admin.display(description="Active")
+    def active_badge(self, obj: TenantHazardConfig):
+        return pill("ACTIVE", "#10B981") if obj.is_active else pill("inactive", "#64748B")
+
+    @admin.display(description="Default")
+    def default_badge(self, obj: TenantHazardConfig):
+        return pill("DEFAULT", "#6366F1") if obj.is_default else "—"
+
+
+# ─────────────────────────────────────────────────────────────
+# DetectionJob
+# ─────────────────────────────────────────────────────────────
+
+@admin.register(DetectionJob)
+class DetectionJobAdmin(ModelAdmin):
+    save_on_top = True
+    list_per_page = 50
+
+    list_display = (
+        "detection_job_id_short",
+        "tenant",
+        "image_link",
+        "hazard_config_name",
+        "status_badge",
+        "total_detections",
+        "inference_time_display",
+        "started_at",
+        "completed_at",
+        "created_at",
+    )
+    list_filter = ("status", "detection_backend", "tenant", "created_at")
+    search_fields = (
+        "detection_job_id",
+        "tenant__name",
+        "image__filename",
+        "hazard_config__name",
+        "error_message",
+    )
+    ordering = ("-created_at",)
+
+    readonly_fields = (
+        "detection_job_id",
+        "created_at",
+        "updated_at",
+    )
+
+    fieldsets = (
+        ("Job", {
+            "fields": ("tenant", "image", "hazard_config", "detection_backend", "status"),
+        }),
+        ("Results", {
+            "fields": ("total_detections", "inference_time_ms"),
+        }),
+        ("Timing", {
+            "fields": ("started_at", "completed_at"),
+        }),
+        ("Errors", {
+            "fields": ("error_message",),
+        }),
+        ("Metadata", {
+            "fields": ("detection_job_id", "created_at", "updated_at"),
+        }),
+    )
+
+    @admin.display(description="Job ID")
+    def detection_job_id_short(self, obj: DetectionJob):
+        return str(obj.detection_job_id)[:8]
+
+    @admin.display(description="Image")
+    def image_link(self, obj: DetectionJob):
+        return obj.image.filename if obj.image else "—"
+
+    @admin.display(description="Config")
+    def hazard_config_name(self, obj: DetectionJob):
+        return obj.hazard_config.name if obj.hazard_config else "—"
+
+    @admin.display(description="Status")
+    def status_badge(self, obj: DetectionJob):
+        colors = {
+            "pending": "#64748B",
+            "running": "#F59E0B",
+            "completed": "#10B981",
+            "failed": "#EF4444",
+            "skipped": "#334155",
+        }
+        return pill(obj.get_status_display(), colors.get(obj.status, "#64748B"))   # type: ignore
+
+    @admin.display(description="Inference")
+    def inference_time_display(self, obj: DetectionJob):
+        if obj.inference_time_ms is None:
+            return "—"
+        return f"{obj.inference_time_ms:.1f} ms"

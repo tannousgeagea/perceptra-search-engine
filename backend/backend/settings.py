@@ -49,6 +49,10 @@ INSTALLED_APPS = [
     'media',
     'embeddings',
     'api_keys',
+    'alerts',
+    'checklists',
+    'collaboration',
+    'wastevision',
 ]
 
 MIDDLEWARE = [
@@ -194,6 +198,19 @@ SAM_CHECKPOINT_PATH = env('SAM_CHECKPOINT_PATH', None)
 
 STATIC_URL = 'static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+
+# ============================================
+# WasteVision Configuration
+# ============================================
+
+WASTEVISION_FRAME_FPS     = int(env('WASTEVISION_FRAME_FPS', '2'))
+WASTEVISION_MAX_CAMERAS   = int(env('WASTEVISION_MAX_CAMERAS', '16'))
+WASTEVISION_VLM_WORKERS   = int(env('WASTEVISION_VLM_WORKERS', '3'))
+WASTEVISION_VLM_PROVIDER  = env('WASTEVISION_VLM_PROVIDER', '')   # overrides LLM_PROVIDER
+WASTEVISION_VLM_MODEL     = env('WASTEVISION_VLM_MODEL', '')       # overrides LLM_MODEL
+WASTEVISION_DEDUP_WINDOW  = int(env('WASTEVISION_DEDUP_WINDOW', '300'))   # seconds
+WASTEVISION_CONSECUTIVE_N = int(env('WASTEVISION_CONSECUTIVE_N', '3'))    # frames for escalation
+WASTEVISION_DRIFT_PCT     = float(env('WASTEVISION_DRIFT_PCT', '30.0'))   # % composition jump
 STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]
 
 # Default primary key field type
@@ -314,6 +331,13 @@ UNFOLD = {
                 "title": _("Media"),
                 "collapsible": True,
                 "items": [
+                    {
+                        "title": _("Media Storage"),
+                        "icon": "folder",
+                        "link": reverse_lazy(
+                            "admin:media_media_changelist"
+                        ),
+                    },
                     {
                         "title": _("Videos"),
                         "icon": "movie",

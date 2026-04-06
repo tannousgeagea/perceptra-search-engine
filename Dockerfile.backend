@@ -4,7 +4,7 @@ FROM pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
 LABEL maintainer="tannous.geagea@wasteant.com"
 
 # Versionining as "b-beta, a-alpha, rc - release candidate"
-LABEL com.wasteant.version="1.1b1"
+LABEL com.optivyn.version="1.1b1"
 
 # [CHECK] Whether it is convenient to use the local user values or create ENV variables, or run everyhting with root
 ARG user=appuser
@@ -58,6 +58,15 @@ RUN pip3 install opencv-python>=4.8.0
 RUN git clone https://github.com/facebookresearch/sam3.git /opt/sam3
 RUN pip3 install -e /opt/sam3
 RUN pip3 install -e /opt/sam3[notebooks]
+RUN pip3 install perceptra-seg[all]
+RUN pip3 install celery
+RUN pip3 install redis
+RUN pip3 install pydantic[email]
+
+RUN pip3 install anthropic
+RUN pip3 install openai
+RUN pip3 install httpx
+RUN pip3 install -U numpy
 
 # upgrade everything
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -q -y \

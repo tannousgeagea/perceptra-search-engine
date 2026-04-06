@@ -172,7 +172,7 @@ class APIKeyAdmin(ModelAdmin):
             "fields": ("expires_at", "last_used_at", "total_requests", "validity_badge"),
         }),
         ("Key Metadata", {
-            "fields": ("api_key_id", "key_prefix", "key_hash_masked", "created_by", "created_at", "updated_at"),
+            "fields": ("api_key_id", "key_prefix", "key_hash_masked", "created_by", "created_at", "updated_at", "owned_by"),
         }),
     )
 

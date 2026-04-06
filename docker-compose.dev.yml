@@ -1,0 +1,18 @@
+# Development override — replaces the production nginx frontend
+# with Vite's HMR dev server.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up frontend
+#
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules          # anonymous volume keeps container modules isolated
+    environment:
+      - VITE_API_BASE=http://localhost:8000
+    ports:
+      - "3000:3000"
